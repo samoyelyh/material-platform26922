@@ -57,7 +57,7 @@ import { buildAsinUrl, parseAsinList } from '@/lib/asin'
 import { toMainMaterialView, toMaterialVariantRow, toVariantMaterialView, type MaterialVariantRow } from '@/lib/materialView'
 import type { Material as MaterialView, MaterialDesignRef } from '@/types/material'
 import type { PackageUploadedFilesDto } from '@/services/apiClient'
-import { API_ENABLED, materialApi } from '@/services/apiClient'
+import { API_ENABLED, materialApi, type DistributionTaskDto } from '@/services/apiClient'
 import { buildHydratePatch } from '@/services/overviewMapper'
 import { buildDemoSeed, type DemoSeed } from '@/mock/demoSeed'
 import type {
@@ -1315,9 +1315,81 @@ export function addMaterialPsdRevision(
   }
 }
 
+// ---------------------------------------------------------------- 派发 DTO → 领域实体
+//
+// 真实后端模式下，把 `DistributionTaskDto` 映射成前端 `DistributionTask`（字段一一对应），
+// hydrate 进 store 后，现有 `getTaskOverview` / `getTask` 等选择器即可直接消费真实数据。
+
+function toDistributionTaskEntity(dto: DistributionTaskDto): DistributionTask {
+  return {
+    id: dto.id,
+    designPackageId: dto.designPackageId,
+    batchId: dto.batchId,
+    packageName: dto.packageName,
+    packageCode: dto.packageCode,
+    versionCode: dto.versionCode,
+    designerName: dto.designerName,
+    operatorId: dto.operatorId,
+    operatorName: dto.operatorName,
+    status: dto.status,
+    items: dto.items.map((it) => ({
+      id: it.id,
+      distributionTaskId: it.distributionTaskId,
+      variantId: it.variantId,
+      revisionId: it.revisionId,
+      deliveryRound: it.deliveryRound,
+      createdAt: it.createdAt,
+    })),
+    parentAsin: dto.parentAsin
+      ? {
+          asin: dto.parentAsin.asin,
+          site: (dto.parentAsin.site as MarketplaceSiteCode | undefined) ?? undefined,
+          listingUrl: dto.parentAsin.listingUrl ?? undefined,
+        }
+      : undefined,
+    children: dto.children.map((c) => ({
+      asin: c.asin,
+      site: (c.site as MarketplaceSiteCode | undefined) ?? undefined,
+      listingUrl: c.listingUrl ?? undefined,
+      overrideVariantIds: c.overrideVariantIds ?? [],
+    })),
+    assignedAt: dto.assignedAt,
+    receivedAt: dto.receivedAt ?? undefined,
+    completedAt: dto.completedAt ?? undefined,
+    cancelledAt: dto.cancelledAt ?? undefined,
+    remark: dto.remark ?? undefined,
+  }
+}
+
+function upsertTask(task: DistributionTask) {
+  commit({ tasks: { ...getWorkflowState().tasks, [task.id]: task } })
+}
+
+/**
+ * 真实后端：把某设计包的全部派发任务 hydrate 进 store。
+ * 派发任务的数据事实以后端为准；本地 Mock 模式下不调用。
+ */
+export async function loadDistributionTasksFromApi(pkgId: string) {
+  if (!API_ENABLED) return
+  const tasks = await materialApi.listDesignPackageDistributions(pkgId)
+  const next = { ...getWorkflowState().tasks }
+  for (const dto of tasks) next[dto.id] = toDistributionTaskEntity(dto)
+  commit({ tasks: next })
+}
+
+/** 真实后端：拉取单个派发任务并 hydrate 进 store。 */
+export async function loadDistributionTaskFromApi(taskId: string) {
+  if (!API_ENABLED) return
+  const dto = await materialApi.getDistribution(taskId)
+  upsertTask(toDistributionTaskEntity(dto))
+}
+
 // ---------------------------------------------------------------- 提交与派发
 
-export function submitAndDispatch(pkgId: string, actor: string): { error?: string; taskId?: string } {
+export async function submitAndDispatch(
+  pkgId: string,
+  actor: string,
+): Promise<{ error?: string; taskId?: string }> {
   const state = getWorkflowState()
   const pkg = state.packages[pkgId]
   if (!pkg) return { error: '设计包不存在' }
@@ -1335,8 +1407,33 @@ export function submitAndDispatch(pkgId: string, actor: string): { error?: strin
 
   const operatorId = operatorsOfPackage(pkgId)[0]?.operatorId ?? session?.operatorId
   const operatorName = operatorsOfPackage(pkgId)[0]?.operatorName ?? session?.operatorName
-  if (!operatorId || !operatorName) return { error: '首次上传必须选择归属运营后才能派发。' }
+  if (!operatorId && !operatorName) return { error: '首次上传必须选择归属运营后才能派发。' }
 
+  const batch = currentBatchOf(pkgId)
+  if (!batch) return { error: '缺少上架版本' }
+
+  if (API_ENABLED) {
+    // 真实后端：派发由后端落库（distribution_tasks + items 快照），前端只做结果 hydrate
+    try {
+      const dto = await materialApi.createDistribution(pkgId, {
+        operatorId: operatorId || undefined,
+        operatorName: operatorName || undefined,
+        remark: pkg.remark ?? undefined,
+      })
+      upsertTask(toDistributionTaskEntity(dto))
+      if (session) {
+        touchSession(session.id, 'SUBMITTED')
+        if (session.packageUploadId)
+          touchUpload(session.packageUploadId, { status: 'SUBMITTED', targetBatchId: batch.id })
+      }
+      return { taskId: dto.id }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '派发失败'
+      return { error: message }
+    }
+  }
+
+  // ---- Mock（开发隔离）：仅 VITE_MATERIAL_API=0 时使用，绝不作为真实业务数据源 ----
   const missing = pairings.filter((p) => p.status === 'UNPAIRED')
   if (missing.length) {
     return {
@@ -1345,9 +1442,6 @@ export function submitAndDispatch(pkgId: string, actor: string): { error?: strin
         .join('、')}），请补齐后再派发。`,
     }
   }
-
-  const batch = currentBatchOf(pkgId)
-  if (!batch) return { error: '缺少上架版本' }
 
   const duplicate = findActiveDistribution(Object.values(state.tasks), batch.id, operatorId)
   if (duplicate) return { error: `该版本已经派发给${operatorName}。`, taskId: duplicate.id }
@@ -1383,17 +1477,33 @@ export function submitAndDispatch(pkgId: string, actor: string): { error?: strin
  * 第十五条：新增派发给其他运营，复用同一套底层副素材。
  * 第九条：同一 Batch + 同一运营 不允许存在两个进行中的任务。
  */
-export function addDistribution(
+export async function addDistribution(
   pkgId: string,
   operatorId: string,
   operatorName: string,
   actor: string,
-): { error?: string; taskId?: string } {
+): Promise<{ error?: string; taskId?: string }> {
   const state = getWorkflowState()
   const pkg = state.packages[pkgId]
   if (!pkg) return { error: '设计包不存在' }
   const batch = currentBatchOf(pkgId)
   if (!batch) return { error: '缺少上架版本' }
+
+  if (API_ENABLED) {
+    // 真实后端：复用派发接口（后端做同一 (batch, operator) 进行中任务查重），不写内存
+    try {
+      const dto = await materialApi.createDistribution(pkgId, {
+        operatorId: operatorId || undefined,
+        operatorName: operatorName || undefined,
+        remark: pkg.remark ?? undefined,
+      })
+      upsertTask(toDistributionTaskEntity(dto))
+      return { taskId: dto.id }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '新增派发失败'
+      return { error: message }
+    }
+  }
 
   const duplicate = findActiveDistribution(Object.values(state.tasks), batch.id, operatorId)
   if (duplicate) return { error: `该版本已经派发给${operatorName}。`, taskId: duplicate.id }
@@ -1419,7 +1529,13 @@ export function addDistribution(
 }
 
 /** 取消派发（取消后才允许重新派发给同一运营） */
-export function cancelDistribution(taskId: string, actor: string) {
+export async function cancelDistribution(taskId: string, actor: string): Promise<void> {
+  if (API_ENABLED) {
+    // 真实 API 失败 → 抛出，调用页面负责 toast；不更新任何成功状态，绝不吞异常
+    const dto = await materialApi.cancelDistribution(taskId)
+    upsertTask(toDistributionTaskEntity(dto))
+    return
+  }
   const state = getWorkflowState()
   const task = state.tasks[taskId]
   if (!task) return
@@ -1435,7 +1551,13 @@ export function cancelDistribution(taskId: string, actor: string) {
 
 // ---------------------------------------------------------------- 运营端
 
-export function receiveTask(taskId: string, actor: string) {
+export async function receiveTask(taskId: string, actor: string): Promise<void> {
+  if (API_ENABLED) {
+    // 真实 API 失败 → 抛出，调用页面负责 toast；不更新任何成功状态，绝不吞异常
+    const dto = await materialApi.receiveDistribution(taskId)
+    upsertTask(toDistributionTaskEntity(dto))
+    return
+  }
   const state = getWorkflowState()
   const task = state.tasks[taskId]
   if (!task) return
@@ -1449,10 +1571,34 @@ export function receiveTask(taskId: string, actor: string) {
   })
 }
 
-export function bindAsins(
+export async function bindAsins(
   taskId: string,
   input: { parentAsin: string; childrenText: string; site?: MarketplaceSiteCode; actor: string },
-) {
+): Promise<{ error?: string }> {
+  if (API_ENABLED) {
+    const parent = input.parentAsin.trim().toUpperCase()
+    if (!/^B0[A-Z0-9]{8}$/.test(parent)) {
+      return { error: 'Parent ASIN 格式应为 B0 + 8 位字母或数字。' }
+    }
+    const parsed = parseAsinList(input.childrenText)
+    if (parsed.asins.length === 0) return { error: '请至少填写 1 个有效的 Child ASIN。' }
+    if (parsed.invalid.length) {
+      return { error: `存在格式不正确的 Child ASIN：${parsed.invalid.slice(0, 5).join('、')}` }
+    }
+    try {
+      const dto = await materialApi.bindDistributionAsins(taskId, {
+        parentAsin: parent,
+        children: parsed.asins,
+        site: input.site,
+      })
+      upsertTask(toDistributionTaskEntity(dto))
+      return {}
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'ASIN 关联失败'
+      return { error: message }
+    }
+  }
+
   const state = getWorkflowState()
   const task = state.tasks[taskId]
   if (!task) return { error: '派发任务不存在' }

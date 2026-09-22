@@ -27,6 +27,9 @@ from app.db.models import (
     DesignPackage,
     DesignPackageMaterial,
     DerivativeBatch,
+    DistributionChildAsin,
+    DistributionParentAsin,
+    DistributionTask,
     Material,
     MaterialVariant,
     VariantRevision,
@@ -251,6 +254,58 @@ def get_variant_detail(db: Session, variant_id: str) -> dict:
     revision = db.get(VariantRevision, variant.current_revision_id) if variant.current_revision_id else None
     asset = db.get(Asset, revision.asset_id) if revision else None
 
+    # 反向聚合展示（不做第二套绑定）：该 Variant 所属 Batch 关联的未取消 DistributionTask
+    # → Parent / Child ASIN。关系始终是 Child ASIN → Batch → Variant 候选，不是 Child → 单个 Variant。
+    distributions: list[dict] = []
+    if batch is not None:
+        tasks = list(
+            db.execute(
+                select(DistributionTask).where(
+                    DistributionTask.batch_id == batch.id,
+                    DistributionTask.status != "CANCELLED",
+                )
+            ).scalars()
+        )
+        task_ids = [t.id for t in tasks]
+        if task_ids:
+            parents = {
+                row.distribution_task_id: row
+                for row in db.execute(
+                    select(DistributionParentAsin).where(
+                        DistributionParentAsin.distribution_task_id.in_(task_ids)
+                    )
+                ).scalars()
+            }
+            child_rows = list(
+                db.execute(
+                    select(DistributionChildAsin).where(
+                        DistributionChildAsin.distribution_task_id.in_(task_ids)
+                    )
+                ).scalars()
+            )
+        else:
+            parents, child_rows = {}, []
+        children_by_task: dict[str, list[dict]] = {}
+        for row in child_rows:
+            children_by_task.setdefault(row.distribution_task_id, []).append(
+                {"asin": row.child_asin, "site": row.site}
+            )
+        for t in tasks:
+            parent = parents.get(t.id)
+            distributions.append(
+                {
+                    "distributionTaskId": t.id,
+                    "batchId": t.batch_id,
+                    "batchCode": t.version_code,
+                    "packageName": t.package_name,
+                    "operatorName": t.operator_name,
+                    "status": t.status,
+                    "parentAsin": parent.parent_asin if parent else None,
+                    "parentSite": parent.site if parent else None,
+                    "children": sorted(children_by_task.get(t.id, []), key=lambda c: c["asin"]),
+                }
+            )
+
     return {
         "id": variant.id,
         "displayCode": variant.display_code,
@@ -273,4 +328,5 @@ def get_variant_detail(db: Session, variant_id: str) -> dict:
         "tags": normalize_tags(list(variant.tags or [])),
         "createdAt": variant.created_at.isoformat(),
         "deleted": variant.deleted,
+        "distributions": distributions,
     }

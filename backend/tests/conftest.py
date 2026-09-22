@@ -123,6 +123,10 @@ def clean_tables():
         conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
         for table in [
             "activity_logs",
+            "distribution_child_asins",
+            "distribution_parent_asins",
+            "distribution_task_items",
+            "distribution_tasks",
             "material_pairings",
             "variant_revisions",
             "material_variants",

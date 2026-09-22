@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { PackagePlus, X } from 'lucide-react';
+import { PackageCheck, PackagePlus, X } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -532,6 +532,7 @@ export default function MaterialCenterPage() {
                 : '全部素材'}
         </span>
         <div className="ml-auto flex items-center gap-2">
+          <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" onClick={() => navigate('/materials/distributions')}><PackageCheck className="h-3.5 w-3.5" />运营派发</Button>
           <Button size="sm" className="h-7 bg-[#3d3192] px-2.5 text-xs hover:bg-[#32277a]" onClick={() => navigate('/materials/upload')}><PackagePlus className="h-3.5 w-3.5" />上传设计包</Button>
         </div>
       </header>

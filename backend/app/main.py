@@ -11,7 +11,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import batches, design_packages, image_search, materials, pairings, uploads
+from app.api import (
+    batches,
+    contract,
+    design_packages,
+    distributions,
+    effect_images,
+    image_search,
+    materials,
+    pairings,
+    uploads,
+)
 from app.core.config import settings
 from app.core.errors import AppError
 from app.schemas.dto import ErrorResponse
@@ -33,8 +43,10 @@ app = FastAPI(
         "- 主素材 MAT + 设计包位置 + PSD Revision\n"
         "- 副素材按本次上传内同名 pair_key 一对一配对（不做内容相似度推断）\n"
         "- 人工确认 / 修改 / 防双重占用\n"
-        "- 确认整包后单事务生成上架版本 V1（DerivativeBatch + MaterialVariant + VariantRevision）\n\n"
-        "本阶段**不包含**：派发运营（DistributionTask）、ASIN、订单 URL 识别（均为 Phase 3）。"
+        "- 确认整包后单事务生成上架版本 V1（DerivativeBatch + MaterialVariant + VariantRevision）\n"
+        "- 派发运营（DistributionTask）→ 运营接收 → 回填 Parent / Child ASIN\n"
+        "- 对 order-center 的只读素材契约（Child ASIN → Batch → Variant 候选 + 图片角色）\n\n"
+        "订单 ZIP / Amazon JSON 解析、买家 Logo、订单审核、销量归因等在独立 order-center。"
     ),
 )
 
@@ -76,6 +88,9 @@ app.include_router(uploads.router, prefix=settings.api_prefix)
 app.include_router(materials.router, prefix=settings.api_prefix)
 app.include_router(pairings.router, prefix=settings.api_prefix)
 app.include_router(batches.router, prefix=settings.api_prefix)
+app.include_router(distributions.router, prefix=settings.api_prefix)
+app.include_router(effect_images.router, prefix=settings.api_prefix)
+app.include_router(contract.router, prefix=settings.api_prefix)
 app.include_router(image_search.router, prefix=settings.api_prefix)
 
 

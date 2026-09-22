@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import { CheckCircle2, ChevronRight, Download, ExternalLink, PackageCheck } from 'lucide-react'
 import { toast } from 'sonner'
@@ -10,9 +10,12 @@ import { Textarea } from '@/components/ui/textarea'
 import { ActivityTimeline, StatusBadge } from '@/components/material/WorkflowPrimitives'
 import { AMAZON_SITES, buildAsinUrl, parseAsinList, resolveListingUrl } from '@/lib/asin'
 import { UPLOAD_TYPE_LABEL, formatDateTime } from '@/lib/workflow'
+import { API_BASE, API_ENABLED } from '@/services/apiClient'
 import {
   bindAsins,
   getTaskOverview,
+  loadAllPackagesFromApi,
+  loadDistributionTaskFromApi,
   receiveTask,
   useWorkflowState,
 } from '@/store/workflowStore'
@@ -32,15 +35,52 @@ export default function DistributionDetailPage({ actorName }: Props) {
   const overview = getTaskOverview(taskId)
   const task = overview?.task
 
-  const [parent, setParent] = useState(task?.parentAsin?.asin ?? '')
-  const [childrenText, setChildrenText] = useState((task?.children ?? []).map((c) => c.asin).join('\n'))
-  const [site, setSite] = useState<MarketplaceSiteCode>(task?.parentAsin?.site ?? 'US')
+  // 真实后端模式下：先 hydrate 设计包（副素材/资产），再拉取派发任务，之后回填表单
+  const [loaded, setLoaded] = useState(!API_ENABLED)
+  const [parent, setParent] = useState('')
+  const [childrenText, setChildrenText] = useState('')
+  const [site, setSite] = useState<MarketplaceSiteCode>('US')
   const [downloaded, setDownloaded] = useState(false)
+
+  useEffect(() => {
+    if (!API_ENABLED) return
+    let cancelled = false
+    void (async () => {
+      try {
+        await loadAllPackagesFromApi()
+        await loadDistributionTaskFromApi(taskId)
+      } catch {
+        // 拉取失败保留 not-found 渲染；不静默回退 Mock
+      }
+      if (!cancelled) setLoaded(true)
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [taskId])
+
+  // 任务加载后回填表单（prev 保护：不覆盖用户已输入的内容）
+  useEffect(() => {
+    if (!task) return
+    setParent((prev) => prev || task.parentAsin?.asin || '')
+    setChildrenText((prev) => prev || (task.children ?? []).map((c) => c.asin).join('\n'))
+    setSite((prev) => prev || (task.parentAsin?.site as MarketplaceSiteCode) || 'US')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task?.id])
 
   const parsed = useMemo(() => parseAsinList(childrenText), [childrenText])
   const variants = overview?.variants ?? []
   const logs = overview?.logs ?? []
   const actor = actorName || task?.operatorName || '运营'
+
+  if (API_ENABLED && !loaded) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-[#f5f6f8] text-sm text-gray-500">
+        <p>正在加载派发任务…</p>
+        <Button variant="outline" onClick={() => navigate('/materials')}>返回素材中心</Button>
+      </div>
+    )
+  }
 
   if (!overview || !task) {
     return (
@@ -54,18 +94,36 @@ export default function DistributionDetailPage({ actorName }: Props) {
   const parentValid = /^B0[A-Z0-9]{8}$/.test(parent.trim().toUpperCase())
   const canSubmit = task.status !== 'ACTIVE' && parentValid && parsed.asins.length > 0 && parsed.invalid.length === 0
 
-  const handleReceive = () => {
-    receiveTask(task.id, actor)
-    toast.success('已接收素材')
+  const handleReceive = async () => {
+    try {
+      await receiveTask(task.id, actor)
+      toast.success('已接收素材')
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '接收素材失败'
+      toast.error(message)
+    }
   }
 
   const handleDownload = () => {
+    if (!API_ENABLED) {
+      setDownloaded(true)
+      toast.success(`已生成素材包 ${task.packageName}_${task.versionCode}.zip（演示环境未接入真实文件服务）`)
+      return
+    }
+    // 真实下载：按 DistributionTask 快照打包的 ZIP（后端 GET /distributions/{id}/download）
+    const url = `${API_BASE}/distributions/${task.id}/download`
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = ''
+    document.body.appendChild(anchor)
+    anchor.click()
+    anchor.remove()
     setDownloaded(true)
-    toast.success(`已生成素材包 ${task.packageName}_${task.versionCode}.zip（演示环境未接入真实文件服务）`)
+    toast.success('已开始下载素材包')
   }
 
-  const handleSubmit = () => {
-    const result = bindAsins(task.id, { parentAsin: parent, childrenText, site, actor })
+  const handleSubmit = async () => {
+    const result = await bindAsins(task.id, { parentAsin: parent, childrenText, site, actor })
     if (result.error) {
       toast.error(result.error)
       return

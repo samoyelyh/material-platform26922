@@ -445,6 +445,20 @@ export interface VariantDetailDto {
   tags: string[]
   createdAt: string
   deleted: boolean
+  /** 反向聚合展示：该 Variant 所属 Batch 关联的 DistributionTask → Parent/Child ASIN（不建第二套绑定） */
+  distributions: VariantDistributionRefDto[]
+}
+
+export interface VariantDistributionRefDto {
+  distributionTaskId: string
+  batchId: string
+  batchCode: string
+  packageName: string
+  operatorName: string
+  status: string
+  parentAsin: string | null
+  parentSite: string | null
+  children: { asin: string; site: string | null }[]
 }
 
 export interface MaterialVariantDto {
@@ -561,6 +575,101 @@ export interface ActivityLogDto {
   before?: string | null
   after?: string | null
   createdAt: string
+}
+
+// ---------------------------------------------------------------- 派发运营 / ASIN（真实后端）
+// 对应 backend `distribution_tasks` / `distribution_task_items` /
+// `distribution_parent_asins` / `distribution_child_asins`。
+
+export interface DistributionTaskItemDto {
+  id: string
+  distributionTaskId: string
+  variantId: string
+  revisionId: string
+  deliveryRound: number
+  createdAt: string
+}
+
+export interface ParentAsinDto {
+  asin: string
+  site?: string | null
+  listingUrl?: string | null
+}
+
+export interface ChildAsinDto {
+  asin: string
+  site?: string | null
+  listingUrl?: string | null
+  overrideVariantIds?: string[]
+}
+
+export interface DistributionTaskDto {
+  id: string
+  designPackageId: string
+  batchId: string
+  packageName: string
+  packageCode: string
+  versionCode: string
+  designerName: string
+  operatorId: string
+  operatorName: string
+  status: 'ACTIVE' | 'RECEIVED' | 'COMPLETED' | 'CANCELLED'
+  assignedAt: string
+  receivedAt?: string | null
+  completedAt?: string | null
+  cancelledAt?: string | null
+  remark?: string | null
+  items: DistributionTaskItemDto[]
+  parentAsin?: ParentAsinDto | null
+  children: ChildAsinDto[]
+  variantCount: number
+  deliveryRound: number
+}
+
+// ---------------------------------------------------------------- Variant 效果图角色（真实后端）
+
+export interface VariantEffectImageDto {
+  id: string
+  variantId: string
+  imageRole: 'MATERIAL_SOURCE' | 'FINAL_EFFECT' | 'PREVIEW_ONLY'
+  soleColor?: string | null
+  assetId?: string | null
+  sourceUrl?: string | null
+  createdBy: string
+  createdAt: string
+}
+
+// ---------------------------------------------------------------- 只读契约（对 order-center）
+
+export interface ContractVariantImageDto {
+  imageRole: string
+  soleColor?: string | null
+  assetId?: string | null
+  uri?: string | null
+}
+
+export interface ContractVariantDto {
+  variantId: string
+  displayCode: string
+  materialId: string
+  materialCode: string
+  categoryCode: string
+  batchId: string
+  images: ContractVariantImageDto[]
+}
+
+export interface ContractChildAsinResponseDto {
+  childAsin: string
+  categoryCode: string
+  batch: {
+    batchId: string
+    batchCode: string
+    versionNo: number
+    categoryCode: string
+    categoryName: string
+    designPackageId: string
+  }
+  variants: ContractVariantDto[]
 }
 
 export interface PackageOverviewDto {
@@ -907,6 +1016,126 @@ export const materialApi = {
   listBatches: (designPackageId: string) =>
     request<DerivativeBatchDto[]>(
       `/design-packages/${encodeURIComponent(designPackageId)}/batches`,
+    ),
+
+  // ---- 派发运营 / ASIN（真实后端） ----
+  /** 该设计包的全部派发任务 */
+  listDesignPackageDistributions: (designPackageId: string) =>
+    request<DistributionTaskDto[]>(
+      `/design-packages/${encodeURIComponent(designPackageId)}/distributions`,
+    ),
+
+  /** 派发当前最新 Batch 给运营 */
+  createDistribution: (
+    designPackageId: string,
+    payload: { operatorId?: string; operatorName?: string; remark?: string },
+  ) =>
+    request<DistributionTaskDto>(
+      `/design-packages/${encodeURIComponent(designPackageId)}/distributions`,
+      jsonInit('POST', payload),
+    ),
+
+  /** 单个派发任务详情 */
+  getDistribution: (taskId: string) =>
+    request<DistributionTaskDto>(`/distributions/${encodeURIComponent(taskId)}`),
+
+  /** 全部派发任务（分发列表，可按状态筛选） */
+  listAllDistributions: (status?: string) => {
+    const search = status ? `?status=${encodeURIComponent(status)}` : ''
+    return request<DistributionTaskDto[]>(`/distributions${search}`)
+  },
+
+  /** 运营接收素材 */
+  receiveDistribution: (taskId: string) =>
+    request<DistributionTaskDto>(
+      `/distributions/${encodeURIComponent(taskId)}/receive`,
+      { method: 'POST' },
+    ),
+
+  /** 取消派发 */
+  cancelDistribution: (taskId: string) =>
+    request<DistributionTaskDto>(
+      `/distributions/${encodeURIComponent(taskId)}/cancel`,
+      { method: 'POST' },
+    ),
+
+  /** 运营回填 Parent / Child ASIN */
+  bindDistributionAsins: (
+    taskId: string,
+    payload: { parentAsin: string; children: string[]; site?: string },
+  ) =>
+    request<DistributionTaskDto>(
+      `/distributions/${encodeURIComponent(taskId)}/asins`,
+      jsonInit('PUT', payload),
+    ),
+
+  // ---- Variant 效果图角色（真实后端） ----
+  /** 该 Variant 的全部图片角色 */
+  listVariantEffectImages: (variantId: string) =>
+    request<VariantEffectImageDto[]>(
+      `/material-variants/${encodeURIComponent(variantId)}/effect-images`,
+    ),
+
+  /** 复用已有 Asset / sourceUrl 登记或覆盖一个图片角色 */
+  registerVariantEffectImage: (
+    variantId: string,
+    payload: {
+      imageRole: 'MATERIAL_SOURCE' | 'FINAL_EFFECT' | 'PREVIEW_ONLY'
+      soleColor?: string | null
+      assetId?: string | null
+      sourceUrl?: string | null
+      actor?: string
+    },
+  ) =>
+    request<VariantEffectImageDto>(
+      `/material-variants/${encodeURIComponent(variantId)}/effect-images`,
+      jsonInit('POST', payload),
+    ),
+
+  /** 上传新效果图 → 创建/复用 Asset → 关联到 Variant（multipart） */
+  uploadVariantEffectImage: (
+    variantId: string,
+    file: File,
+    payload: { imageRole: 'MATERIAL_SOURCE' | 'FINAL_EFFECT' | 'PREVIEW_ONLY'; soleColor?: string; actor?: string },
+  ): Promise<VariantEffectImageDto> =>
+    new Promise((resolve, reject) => {
+      const form = new FormData()
+      form.append('file', file, file.name)
+      form.append('imageRole', payload.imageRole)
+      if (payload.soleColor) form.append('soleColor', payload.soleColor)
+      if (payload.actor) form.append('actor', payload.actor)
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${API_BASE}/material-variants/${encodeURIComponent(variantId)}/effect-images/upload`)
+      xhr.onerror = () =>
+        reject(new ApiError('效果图上传失败（网络中断）', 'NETWORK_ERROR', 0))
+      xhr.onload = () => {
+        let body: unknown = null
+        try {
+          body = JSON.parse(xhr.responseText)
+        } catch {
+          body = null
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(body as VariantEffectImageDto)
+          return
+        }
+        const parsed = (body ?? {}) as ApiErrorBody
+        reject(
+          new ApiError(
+            parsed.message || `上传失败（HTTP ${xhr.status}）`,
+            parsed.code ?? `HTTP_${xhr.status}`,
+            xhr.status,
+            parsed.detail ?? null,
+          ),
+        )
+      }
+      xhr.send(form)
+    }),
+
+  /** 只读契约：Child ASIN → Batch → Variant 候选 + 图片角色 */
+  contractByChildAsin: (childAsin: string) =>
+    request<ContractChildAsinResponseDto>(
+      `/contract/materials-by-child-asin/${encodeURIComponent(childAsin)}`,
     ),
 
   // ---- Asset 上传 ----

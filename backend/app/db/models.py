@@ -748,3 +748,156 @@ class VariantEffectImage(Base):
         ),
         {"comment": "Variant 图片角色（MATERIAL_SOURCE / FINAL_EFFECT Black/White）"},
     )
+
+
+# ---------------------------------------------------------------- 派发运营 + ASIN
+#
+# 前端此前把「派发 → 接收 → 回填 Parent/Child ASIN」只放在内存态（workflowStore.tasks）。
+# 这里把该业务链落成真实素材域表，作为对 order-center 只读契约
+# （Child ASIN → Batch → Variant 候选）的事实来源。订单中心侧不在素材库建表。
+
+
+class DistributionTask(Base):
+    """一次派发（DerivativeBatch → operator）。含派发当时的展示快照字段。"""
+
+    __tablename__ = "distribution_tasks"
+
+    id: Mapped[str] = mapped_column(VARCHAR(64), primary_key=True)
+    design_package_id: Mapped[str] = mapped_column(
+        VARCHAR(64), ForeignKey("design_packages.id", ondelete="CASCADE"), nullable=False
+    )
+    batch_id: Mapped[str] = mapped_column(
+        VARCHAR(64), ForeignKey("derivative_batches.id", ondelete="CASCADE"), nullable=False
+    )
+
+    # ---- SNAPSHOT FIELD：派发当时的展示名称，仅供历史文案，不是 join / 搜索事实来源 ----
+    package_name: Mapped[str] = mapped_column(VARCHAR(255), nullable=False)
+    package_code: Mapped[str] = mapped_column(VARCHAR(64), nullable=False)
+    version_code: Mapped[str] = mapped_column(VARCHAR(16), nullable=False)
+    designer_name: Mapped[str] = mapped_column(VARCHAR(128), nullable=False)
+    # -------------------------------------------------------------------------
+
+    operator_id: Mapped[str] = mapped_column(VARCHAR(64), nullable=False)
+    operator_name: Mapped[str] = mapped_column(VARCHAR(128), nullable=False)
+
+    status: Mapped[str] = mapped_column(VARCHAR(16), nullable=False, default="ACTIVE")
+
+    assigned_at: Mapped[datetime] = _ts()
+    received_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+    remark: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = _ts()
+    updated_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, server_default=func.now(6), onupdate=func.now(6)
+    )
+
+    items: Mapped[list["DistributionTaskItem"]] = relationship(
+        back_populates="distribution_task",
+        cascade="all, delete-orphan",
+        foreign_keys="DistributionTaskItem.distribution_task_id",
+    )
+    children: Mapped[list["DistributionChildAsin"]] = relationship(
+        back_populates="distribution_task",
+        cascade="all, delete-orphan",
+        foreign_keys="DistributionChildAsin.distribution_task_id",
+    )
+    parent: Mapped["DistributionParentAsin | None"] = relationship(
+        back_populates="distribution_task",
+        cascade="all, delete-orphan",
+        uselist=False,
+        foreign_keys="DistributionParentAsin.distribution_task_id",
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('ACTIVE','RECEIVED','COMPLETED','CANCELLED')",
+            name="ck_distribution_tasks_status",
+        ),
+        Index("ix_distribution_tasks_batch_operator", "batch_id", "operator_id", "status"),
+        {"comment": "派发任务（batch → operator）"},
+    )
+
+
+class DistributionTaskItem(Base):
+    """派发当时的副素材 + Revision 快照。Revision 升级不改变历史交付内容。"""
+
+    __tablename__ = "distribution_task_items"
+
+    id: Mapped[str] = mapped_column(VARCHAR(64), primary_key=True)
+    distribution_task_id: Mapped[str] = mapped_column(
+        VARCHAR(64), ForeignKey("distribution_tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    variant_id: Mapped[str] = mapped_column(
+        VARCHAR(64), ForeignKey("material_variants.id", ondelete="CASCADE"), nullable=False
+    )
+    revision_id: Mapped[str] = mapped_column(
+        VARCHAR(64), ForeignKey("variant_revisions.id", ondelete="CASCADE"), nullable=False
+    )
+    delivery_round: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = _ts()
+
+    distribution_task: Mapped[DistributionTask] = relationship(
+        back_populates="items", foreign_keys=[distribution_task_id]
+    )
+
+    __table_args__ = (
+        CheckConstraint("delivery_round >= 1", name="ck_distribution_items_round"),
+        Index("ix_distribution_items_task", "distribution_task_id"),
+        Index("ix_distribution_items_variant", "variant_id"),
+        {"comment": "派发快照：副素材 + 当时 Revision + 交付轮次"},
+    )
+
+
+class DistributionParentAsin(Base):
+    """派发任务的 Parent ASIN。一个任务一个，本身即唯一业务标识（不叠站点）。"""
+
+    __tablename__ = "distribution_parent_asins"
+
+    id: Mapped[str] = mapped_column(VARCHAR(64), primary_key=True)
+    distribution_task_id: Mapped[str] = mapped_column(
+        VARCHAR(64), ForeignKey("distribution_tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    parent_asin: Mapped[str] = mapped_column(VARCHAR(32), nullable=False)
+    site: Mapped[str | None] = mapped_column(VARCHAR(8), nullable=True)
+    listing_url: Mapped[str | None] = mapped_column(VARCHAR(2048), nullable=True)
+    created_at: Mapped[datetime] = _ts()
+
+    distribution_task: Mapped[DistributionTask] = relationship(
+        back_populates="parent", foreign_keys=[distribution_task_id]
+    )
+
+    __table_args__ = (
+        UniqueConstraint("distribution_task_id", name="uq_distribution_parent_task"),
+        {"comment": "派发任务 Parent ASIN（一个任务一个，本身即唯一标识）"},
+    )
+
+
+class DistributionChildAsin(Base):
+    """派发任务的 Child ASIN。order-center 契约按 child_asin 检索 Batch / Variant。"""
+
+    __tablename__ = "distribution_child_asins"
+
+    id: Mapped[str] = mapped_column(VARCHAR(64), primary_key=True)
+    distribution_task_id: Mapped[str] = mapped_column(
+        VARCHAR(64), ForeignKey("distribution_tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    child_asin: Mapped[str] = mapped_column(VARCHAR(32), nullable=False)
+    site: Mapped[str | None] = mapped_column(VARCHAR(8), nullable=True)
+    listing_url: Mapped[str | None] = mapped_column(VARCHAR(2048), nullable=True)
+    # 预留：Child 单独素材覆盖（本轮不做 UI，仅保留列）
+    override_variant_ids: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = _ts()
+
+    distribution_task: Mapped[DistributionTask] = relationship(
+        back_populates="children", foreign_keys=[distribution_task_id]
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "distribution_task_id", "child_asin", name="uq_distribution_child_task_asin"
+        ),
+        Index("ix_distribution_child_asin", "child_asin"),
+        {"comment": "派发任务 Child ASIN（订单中心契约检索入口）"},
+    )

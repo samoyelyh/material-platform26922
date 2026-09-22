@@ -831,6 +831,195 @@ class ActivityLogDTO(BaseModel):
         )
 
 
+# ---------------------------------------------------------------- 派发运营 + ASIN
+#
+# 前端此前把「派发 → 接收 → 回填 Parent/Child ASIN」只放在内存态。这里落成真实素材域
+# 表（distribution_tasks / items / parent_asins / child_asins），是素材侧真实业务链。
+
+
+class DistributionTaskItemDTO(BaseModel):
+    id: str
+    distributionTaskId: str
+    variantId: str
+    revisionId: str
+    deliveryRound: int = 1
+    createdAt: datetime
+
+    @classmethod
+    def from_entity(cls, item) -> "DistributionTaskItemDTO":
+        return cls(
+            id=item.id,
+            distributionTaskId=item.distribution_task_id,
+            variantId=item.variant_id,
+            revisionId=item.revision_id,
+            deliveryRound=item.delivery_round,
+            createdAt=item.created_at,
+        )
+
+
+class ChildAsinDTO(BaseModel):
+    asin: str
+    site: str | None = None
+    listingUrl: str | None = None
+    overrideVariantIds: list[str] = Field(default_factory=list)
+
+    @classmethod
+    def from_entity(cls, child) -> "ChildAsinDTO":
+        return cls(
+            asin=child.child_asin,
+            site=child.site,
+            listingUrl=child.listing_url,
+            overrideVariantIds=list(child.override_variant_ids or []),
+        )
+
+
+class ParentAsinDTO(BaseModel):
+    asin: str
+    site: str | None = None
+    listingUrl: str | None = None
+
+    @classmethod
+    def from_entity(cls, parent) -> "ParentAsinDTO":
+        return cls(
+            asin=parent.parent_asin,
+            site=parent.site,
+            listingUrl=parent.listing_url,
+        )
+
+
+class DistributionTaskDTO(BaseModel):
+    id: str
+    designPackageId: str
+    batchId: str
+    packageName: str
+    packageCode: str
+    versionCode: str
+    designerName: str
+    operatorId: str
+    operatorName: str
+    status: str
+    assignedAt: datetime
+    receivedAt: datetime | None = None
+    completedAt: datetime | None = None
+    cancelledAt: datetime | None = None
+    remark: str | None = None
+
+    # ---- 展开字段 ----
+    items: list[DistributionTaskItemDTO] = Field(default_factory=list)
+    parentAsin: ParentAsinDTO | None = None
+    children: list[ChildAsinDTO] = Field(default_factory=list)
+    variantCount: int = 0
+    deliveryRound: int = 0
+
+
+# ---------------------------------------------------------------- Variant 效果图角色
+
+
+class VariantEffectImageDTO(BaseModel):
+    id: str
+    variantId: str
+    imageRole: str
+    soleColor: str | None = None
+    assetId: str | None = None
+    sourceUrl: str | None = None
+    createdBy: str
+    createdAt: datetime
+
+    @classmethod
+    def from_entity(cls, img) -> "VariantEffectImageDTO":
+        return cls(
+            id=img.id,
+            variantId=img.variant_id,
+            imageRole=img.image_role,
+            soleColor=img.sole_color,
+            assetId=img.asset_id,
+            sourceUrl=img.source_url,
+            createdBy=img.created_by,
+            createdAt=img.created_at,
+        )
+
+
+class VariantEffectImageCreateRequest(BaseModel):
+    """为 Variant 登记一张图片角色。优先复用已有 Asset：assetId 或 sourceUrl 二选一。"""
+
+    imageRole: Literal["MATERIAL_SOURCE", "FINAL_EFFECT", "PREVIEW_ONLY"]
+    soleColor: Literal["BLACK", "WHITE", "NONE", "UNKNOWN"] | None = Field(
+        default=None,
+        description="FINAL_EFFECT 必须区分 BLACK / WHITE；其余角色可空",
+    )
+    assetId: str | None = Field(default=None, max_length=64)
+    sourceUrl: str | None = Field(default=None, max_length=2048)
+    actor: str | None = Field(default=None, max_length=128)
+
+
+# ---------------------------------------------------------------- 只读契约（对 order-center）
+#
+# 原则：只读 / DTO 稳定 / 不暴露内部 ORM / 不让订单中心依赖素材库表结构。
+# 只返回订单中心识别素材所需的事实：Child ASIN → Batch → Variant 候选 + 图片角色。
+
+
+class ContractVariantImageDTO(BaseModel):
+    """Variant 某个图片角色的引用（复用已有 Asset / variant_effect_images）。"""
+
+    imageRole: str
+    soleColor: str | None = None
+    assetId: str | None = None
+    uri: str | None = Field(default=None, description="浏览器可访问地址（后端代理）")
+
+
+class ContractVariantDTO(BaseModel):
+    """契约里的一个 Variant 候选。"""
+
+    variantId: str
+    displayCode: str
+    materialId: str
+    materialCode: str
+    categoryCode: str
+    batchId: str
+
+    # 图片角色：MATERIAL_SOURCE / FINAL_EFFECT（BLACK / WHITE 可区分）
+    images: list[ContractVariantImageDTO] = Field(default_factory=list)
+
+    @property
+    def materialSource(self) -> ContractVariantImageDTO | None:
+        for img in self.images:
+            if img.imageRole == "MATERIAL_SOURCE":
+                return img
+        return None
+
+    @property
+    def finalEffectBlack(self) -> ContractVariantImageDTO | None:
+        for img in self.images:
+            if img.imageRole == "FINAL_EFFECT" and (img.soleColor or "").upper() == "BLACK":
+                return img
+        return None
+
+    @property
+    def finalEffectWhite(self) -> ContractVariantImageDTO | None:
+        for img in self.images:
+            if img.imageRole == "FINAL_EFFECT" and (img.soleColor or "").upper() == "WHITE":
+                return img
+        return None
+
+
+class ContractBatchDTO(BaseModel):
+    batchId: str
+    batchCode: str
+    versionNo: int
+    categoryCode: str
+    categoryName: str
+    designPackageId: str
+
+
+class ContractChildAsinResponseDTO(BaseModel):
+    """GET /contract/materials-by-child-asin/{child_asin} 的稳定契约响应。"""
+
+    childAsin: str
+    categoryCode: str
+    batch: ContractBatchDTO
+    variants: list[ContractVariantDTO] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------- 错误
 
 

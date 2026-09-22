@@ -13,7 +13,7 @@ import {
   useWorkflowState,
 } from '@/store/workflowStore';
 import { toast } from 'sonner';
-import { resolveMediaUrl } from '@/services/apiClient';
+import { materialApi, API_ENABLED, resolveMediaUrl, type VariantEffectImageDto } from '@/services/apiClient';
 import { MaterialAsinList } from './MaterialAsinList';
 import { MaterialBasicInfo } from './MaterialBasicInfo';
 import { MaterialDesignList } from './MaterialDesignList';
@@ -156,11 +156,19 @@ interface VariantDetailState {
   variantId: string;
   detail: import('@/services/apiClient').VariantDetailDto | null;
   history: HistoryEntry[];
+  effectImages: VariantEffectImageDto[];
   loading: boolean;
 }
 
-const VARIANT_TABS = ['基本信息', '关联ASIN', '流转记录'] as const;
+const VARIANT_TABS = ['基本信息', '图片资产', '关联ASIN', '流转记录'] as const;
 type VariantTabKey = (typeof VARIANT_TABS)[number];
+
+/** 图片角色中文名与提示（MATERIAL_SOURCE=素材原图；FINAL_EFFECT=带设计的最终效果图） */
+const IMAGE_ROLE_LABEL: Record<string, { label: string; hint: string }> = {
+  MATERIAL_SOURCE: { label: '素材原图', hint: '副素材源图（来自当前 Revision）' },
+  'FINAL_EFFECT/BLACK': { label: 'Black 最终效果图', hint: '带设计的最终效果图（Black）' },
+  'FINAL_EFFECT/WHITE': { label: 'White 最终效果图', hint: '带设计的最终效果图（White）' },
+};
 
 /**
  * 副素材详情。**与主素材详情同款界面结构**：
@@ -182,6 +190,7 @@ function VariantDetailView({
     variantId,
     detail: null,
     history: [],
+    effectImages: [],
     loading: true,
   });
   // Tab 按 variantId 派生：换一个副素材时自动回到「基本信息」，不在 effect 里 setState
@@ -192,6 +201,14 @@ function VariantDetailView({
   const tab = tabNav.variantId === variantId ? tabNav.tab : '基本信息';
   const setTab = (next: VariantTabKey) => setTabNav({ variantId, tab: next });
 
+  const reloadEffectImages = () => {
+    if (!API_ENABLED) return
+    void materialApi
+      .listVariantEffectImages(variantId)
+      .then((rows) => setState((s) => (s.variantId === variantId ? { ...s, effectImages: rows } : s)))
+      .catch(() => setState((s) => (s.variantId === variantId ? { ...s, effectImages: [] } : s)));
+  };
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
@@ -200,11 +217,14 @@ function VariantDetailView({
         getVariantHistoryFromApi(variantId),
       ]);
       if (cancelled) return;
-      setState({ variantId, detail, history: history as HistoryEntry[], loading: false });
+      setState({ variantId, detail, history: history as HistoryEntry[], effectImages: [], loading: false });
+      // 图片角色（真实后端）
+      if (API_ENABLED) reloadEffectImages();
     })();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [variantId]);
 
   if (state.loading) {
@@ -288,6 +308,182 @@ function VariantDetailView({
     );
   };
 
+  /** 图片资产 Tab：MATERIAL_SOURCE / FINAL_EFFECT Black / White，可上传或复用已有 Asset */
+  const renderImages = () => {
+    const slots: { key: string; label: string; hint: string; role: string; color?: string }[] = [
+      { key: 'MATERIAL_SOURCE', label: IMAGE_ROLE_LABEL.MATERIAL_SOURCE.label, hint: IMAGE_ROLE_LABEL.MATERIAL_SOURCE.hint, role: 'MATERIAL_SOURCE' },
+      { key: 'FINAL_EFFECT/BLACK', label: IMAGE_ROLE_LABEL['FINAL_EFFECT/BLACK'].label, hint: IMAGE_ROLE_LABEL['FINAL_EFFECT/BLACK'].hint, role: 'FINAL_EFFECT', color: 'BLACK' },
+      { key: 'FINAL_EFFECT/WHITE', label: IMAGE_ROLE_LABEL['FINAL_EFFECT/WHITE'].label, hint: IMAGE_ROLE_LABEL['FINAL_EFFECT/WHITE'].hint, role: 'FINAL_EFFECT', color: 'WHITE' },
+    ];
+    const findImage = (slot: { role: string; color?: string }) =>
+      state.effectImages.find(
+        (img) => img.imageRole === slot.role && (slot.color ? (img.soleColor ?? '').toUpperCase() === slot.color : true),
+      );
+
+    const onFile = (slot: { role: string; color?: string }, file: File) => {
+      void materialApi
+        .uploadVariantEffectImage(variantId, file, {
+          imageRole: slot.role as 'MATERIAL_SOURCE' | 'FINAL_EFFECT' | 'PREVIEW_ONLY',
+          soleColor: slot.color,
+          actor: '素材中心',
+        })
+        .then(() => {
+          toast.success(`${slot.color ?? '素材'}图片已登记`);
+          reloadEffectImages();
+        })
+        .catch((err) => toast.error(err instanceof Error ? err.message : '上传失败'));
+    };
+
+    const reuseSource = () => {
+      if (!detail.assetId) {
+        toast.error('该副素材没有可复用的源图 Asset');
+        return;
+      }
+      void materialApi
+        .registerVariantEffectImage(variantId, {
+          imageRole: 'MATERIAL_SOURCE',
+          assetId: detail.assetId,
+          actor: '素材中心',
+        })
+        .then(() => {
+          toast.success('已复用当前源图作为素材原图');
+          reloadEffectImages();
+        })
+        .catch((err) => toast.error(err instanceof Error ? err.message : '登记失败'));
+    };
+
+    return (
+      <div className="px-5 py-4">
+        <p className="mb-3 text-[11px] text-gray-400">
+          FINAL_EFFECT 是「带设计的鞋子最终效果图」（Black / White），不是普通颜色预览图。图片优先复用已有 Asset，不重复创建物理文件。
+        </p>
+        <div className="space-y-3">
+          {slots.map((slot) => {
+            const img = findImage(slot);
+            const uri = img?.assetId
+              ? resolveMediaUrl(`/api/assets/${img.assetId}/content`)
+              : img?.sourceUrl
+                ? resolveMediaUrl(img.sourceUrl)
+                : '';
+            return (
+              <div key={slot.key} className="rounded-md border border-gray-100 bg-white p-3">
+                <div className="mb-2 flex items-center justify-between">
+                  <div>
+                    <span className="text-[13px] font-medium text-gray-700">{slot.label}</span>
+                    <span className="ml-2 text-[11px] text-gray-400">{slot.hint}</span>
+                  </div>
+                  <label className="cursor-pointer rounded border border-[#3d3192]/30 px-2 py-0.5 text-[11px] text-[#3d3192] hover:bg-[#f0eef9]">
+                    上传/替换
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) onFile(slot, file);
+                        e.target.value = '';
+                      }}
+                    />
+                  </label>
+                </div>
+                {uri ? (
+                  <a href={uri} target="_blank" rel="noreferrer" title="查看大图">
+                    <img src={uri} alt={slot.label} className="h-32 w-full rounded object-contain bg-gray-50" />
+                  </a>
+                ) : (
+                  <div className="flex h-32 items-center justify-center rounded bg-gray-50 text-[12px] text-gray-400">
+                    尚未登记{slot.color ? `（${slot.color}）` : ''}
+                  </div>
+                )}
+                {slot.key === 'MATERIAL_SOURCE' && (
+                  <button
+                    onClick={reuseSource}
+                    className="mt-2 text-[11px] text-[#3d3192] hover:underline"
+                  >
+                    复用当前源图作为素材原图
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  /** 关联ASIN Tab：反向聚合展示（Variant → Batch → DistributionTask → Parent/Child ASIN） */
+  const renderDistributions = () => {
+    const rows = detail.distributions ?? [];
+    if (!rows.length) {
+      return (
+        <div className="px-5 py-16 text-center text-[13px] text-gray-400">
+          该副素材所属 Batch 尚未关联派发任务 / ASIN
+          <div className="mt-1 text-[11px] text-gray-400">
+            关系为 Child ASIN → Batch → Variant 候选（不是 Child 绑定单个 Variant）
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="px-5 py-4">
+        <p className="mb-3 text-[11px] text-gray-400">
+          反向聚合自真实 Distribution 数据：Variant → Batch → DistributionTask → Parent / Child ASIN。
+        </p>
+        <div className="space-y-3">
+          {rows.map((row) => (
+            <div key={row.distributionTaskId} className="rounded-md border border-gray-100 bg-white p-3 text-xs">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-gray-700">
+                <span className="font-medium text-gray-800">{row.packageName}</span>
+                <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">{row.batchCode}</span>
+                <span className="text-gray-400">运营：{row.operatorName}</span>
+                <span className="text-gray-400">状态：{row.status}</span>
+              </div>
+              <div className="mt-2 space-y-1">
+                <div>
+                  <span className="text-gray-400">Parent ASIN：</span>
+                  {row.parentAsin ? (
+                    <a
+                      href={resolveMediaUrl('') || '#'}
+                      onClick={(e) => {
+                        e.preventDefault();
+                        window.open(`https://www.amazon.com/dp/${row.parentAsin}`, '_blank', 'noreferrer');
+                      }}
+                      className="font-mono text-[#3d3192] hover:underline"
+                    >
+                      {row.parentAsin}
+                    </a>
+                  ) : (
+                    <span className="text-gray-300">—</span>
+                  )}
+                </div>
+                <div>
+                  <span className="text-gray-400">Child ASIN（{row.children.length}）：</span>
+                  {row.children.length ? (
+                    <span className="flex flex-wrap gap-1">
+                      {row.children.map((c) => (
+                        <a
+                          key={c.asin}
+                          href={`https://www.amazon.com/dp/${c.asin}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="rounded border border-gray-200 px-1.5 py-0.5 font-mono text-[11px] text-gray-600 hover:border-[#3d3192] hover:text-[#3d3192]"
+                        >
+                          {c.asin}
+                        </a>
+                      ))}
+                    </span>
+                  ) : (
+                    <span className="text-gray-300">—</span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div>
       {/* 顶部大图 + 标题 + 计数条（与主素材详情同款） */}
@@ -348,7 +544,8 @@ function VariantDetailView({
       </div>
 
       {tab === '基本信息' && renderBasic()}
-      {tab === '关联ASIN' && <MaterialAsinList asins={[]} onViewAsin={() => {}} />}
+      {tab === '图片资产' && renderImages()}
+      {tab === '关联ASIN' && renderDistributions()}
       {tab === '流转记录' && (
         <HistoryTab entries={state.history} emptyHint="这个副素材还没有任何流转记录" />
       )}

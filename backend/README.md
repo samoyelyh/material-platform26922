@@ -3,7 +3,8 @@
 **Phase 2 范围：同一次上传内按「同名 pairKey」直接配对 → 人工确认 → 整包统一生成 V1 / V2 / V3。**
 
 > Phase 1 已具备：设计包 / 上传记录 / Asset（BLAKE3 + pHash）/ MAT / 设计包位置 / 上传会话幂等。
-> **Phase 3 才做**：派发运营（DistributionTask）/ ASIN / 订单 URL 识别 / 销量归因。
+> **已落地**：派发运营（DistributionTask）/ Parent / Child ASIN（见第十七节「派发与契约」）。
+> **仍属于独立 order-center**：订单 ZIP / Amazon JSON 解析、买家 Logo、订单审核、销量归因。
 >
 > **重要（本轮重构）**：主副素材关系**只由文件名（同名 pairKey）决定**，
 > 与图片内容无关；**pHash 相似度 / 匈牙利算法 / TopN 候选 / 高-中-低匹配分级已全部删除**。
@@ -144,7 +145,9 @@ python -m alembic revision --autogenerate -m "your_change"
 | `0006_design_code` | **设计编码**：`design_packages.design_code`（用户上传时手填，非唯一 + 建索引）；存量回填成系统 `code` |
 | `0007_tags_responsible` | **标签 / 负责人**：`design_packages.tags`、`material_variants.tags`（JSON 数组），`design_packages.responsible_id / responsible_name`（负责人）；存量负责人回填成设计美工、副素材标签回填成所属主素材 |
 | `0008_asset_image_embeddings` | Asset 图片搜索向量元数据（与素材配对流程隔离） |
-| `0009_order_imports` | **订单导入 Phase A-D**：设计包品类字段；允许非图片文件仅使用 BLAKE3；`order_import_batches`、`order_items`、`order_import_batch_items`、`order_buyer_assets` |
+| `0009_material_category` | **素材域品类**：`design_packages.category_code / category_name`（订单中心依赖它做品类隔离契约） |
+| `0010_variant_effect_images` | **Variant 效果图角色**：`variant_effect_images`（MATERIAL_SOURCE / FINAL_EFFECT Black-White / PREVIEW_ONLY） |
+| `0011_distribution_asin` | **派发运营 + ASIN 落库**：`distribution_tasks` / `distribution_task_items` / `distribution_parent_asins` / `distribution_child_asins` |
 
 > 注意：`alembic.ini` 刻意保持 **纯 ASCII**。configparser 在本机用 GBK 读取该文件，含中文会抛 `UnicodeDecodeError`。
 
@@ -305,7 +308,7 @@ curl http://192.168.0.31:8000/api/health
 - **`DesignPackageMaterial` 只表示「设计包某位置 → 某 MAT」**，文件信息一律通过 `source_asset_id → Asset`，不内联 URL / hash。
 - **MAT 编码并发安全**：`code_sequences` 行级锁（`SELECT ... FOR UPDATE` + `UPDATE`），不用 `SELECT MAX()+1`。
 - **时间列统一 `DATETIME(6)`**：秒级精度会让同一秒内的多次上传无法定序（会导致「最近一次上传」取错）。
-- **Phase 1 未建表**（Phase 3+）：`distribution_tasks` / `distribution_task_items` / `amazon_*_asins` / `order_option_binding`。
+- **派发 / ASIN 已建表**（迁移 `0011`）：`distribution_tasks` / `distribution_task_items` / `distribution_parent_asins` / `distribution_child_asins`。订单中心相关表（`amazon_*_asins` / `order_option_binding` 等）属于独立 order-center，不在此建。
 
 ---
 
@@ -353,7 +356,7 @@ backend/
 - `psd` 尺寸不解析（`width/height` 为 null），PSD 不计算 pHash。
 - 演示级鉴权：`actor` / `uploaderName` 由请求传入，未接入真实登录体系。
 - 指纹中台化：生产 BLAKE3/pHash 由后端计算；浏览器端 Demo 走 SHA-256 + aHash，两者不混存。
-- 派发运营 / ASIN 回填 / 销量归因属 Phase 3，尚未实现。
+- 派发运营 / ASIN 回填已落成真实素材域表（见下「派发与契约」）；销量归因仍属独立 order-center，不在此实现。
 
 ---
 
@@ -741,24 +744,14 @@ DesignPackage.tags →（建包时复制）→ Material.tags →（建版时复�
 - **索引失败不阻断上传**：只记录 `IMAGE_INDEX_FAILED`（ActivityLog，target_type=ASSET），上传事务不受影响
 - **重建索引**：`POST /api/image-search/reindex`（指定 assetId 或全库；逐个用嵌套事务，失败只回滚单个并记录）
 
-### 5. 订单导入 Phase A-D（迁移 0009）
-
-订单导入只新增订单事实和原始文件留存，不复制 `Material` / `Variant` / `Batch`。
-
-- `POST /api/order-imports`：multipart 上传领星 ZIP，可选 `categoryCode` 和 `actor`；保存原始 ZIP/JSON 为 `Asset`，按 `orderItemId`（缺失时可靠复合键）去重。
-- `GET /api/order-imports`、`GET /api/order-imports/{batchId}`：导入批次及状态（`PARSED/PARTIAL/FAILED/DUPLICATE`）。
-- `GET /api/order-imports/{batchId}/items`：规范化订单行，包含 `categoryCode`、`parserVersion`、图片类型、定制字段、买家 Logo 附件引用和审核状态。
-- 解析链路固定为 `GenericOrderParser → CategoryResolver → ParserRegistry → CategoryParser`；通用解析器不包含品类图片规则，未知品类保留为 `REVIEW_REQUIRED`。
-- 当前品类实现为 `BLADE_SHOES_V1`，只识别 `MATERIAL_SOURCE`、`FINAL_EFFECT`、`PREVIEW_ONLY`、`UNKNOWN`；买家 Logo 保存在 `order_buyer_assets`，不创建素材实体。
-
-### 6. 搜索 API
+### 5. 搜索 API
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | POST | `/api/image-search/search` | multipart：`file`（查询图，临时）或 `assetId`（找相似）；`scope=all/main/variant`、`designPackageId`、`tags`（逗号分隔）、`responsibleName`、`topK=20/50/100` |
 | POST | `/api/image-search/reindex` | `assetId` 可选；重建单个或全库搜索向量 |
 
-### 7. 测试与验收
+### 6. 测试与验收
 
 | 层级 | 结果 |
 |---|---|
@@ -767,7 +760,7 @@ DesignPackage.tags →（建包时复制）→ Material.tags →（建版时复�
 | 既有回归（acceptance / variant-detail / upload-tags / history-tags / issues） | 全部 **无** |
 | npm build / 后端测试 | 全绿 / 108 passed |
 
-### 8. 当前搜索准确率问题
+### 7. 当前搜索准确率问题
 
 - ResNet-50（ImageNet 预训练）是**通用图像语义特征**：对内容/物体/风格相似的素材效果好（实测不同图案主素材 0.97、主副图 0.31）
 - **局限**：
@@ -779,83 +772,47 @@ DesignPackage.tags →（建包时复制）→ Material.tags →（建版时复�
 
 ---
 
-## 十六、订单识别与素材归因
+## 十七、派发运营 + ASIN 落库与对 order-center 的只读契约（本轮落地）
 
-### 1. 概述
+> 拆分后 material-platform 只负责素材域。这里把此前仅存在于前端内存态
+> （`workflowStore.tasks`）的「派发 → 接收 → 回填 Parent/Child ASIN」链路，
+> 落成**真实素材域表**，作为对 order-center 只读契约（Child ASIN → Batch →
+> Variant 候选）的事实来源。订单 ZIP / Amazon JSON / 买家 Logo / 审核 / 销量归因
+> 等仍属于独立 order-center，不在这里实现。
 
-基于现有 Material / Variant / Batch / ASIN 体系新增「订单识别与素材归因」模块：
-上传领星订单 ZIP → 解析（GenericOrderParser → CategoryResolver → ParserRegistry → BladeShoesParser）→ NormalizedOrder 落库 → 素材匹配（URL 绑定 / ASIN 候选图片匹配）→ 人工审核 → 销量归因。
-
-### 2. 数据模型（迁移 0009 / 0010 / 0011）
+### 1. 数据模型（迁移 0011）
 
 | 表 | 说明 |
 |---|---|
-| `order_import_batches` | 一次 ZIP 导入；保留原始 ZIP Asset / ZIP blake3 / 品类 / 状态（PARSED/PARTIAL/FAILED/DUPLICATE）/ JSON 数与订单数 |
-| `order_items` | 每个订单行；orderId/orderItemId/asin/sku/quantity/品类/parser_version/raw_json_hash/normalized_payload/匹配状态与分数；`dedupe_key`（orderItemId）去重，重复导入不重复计销量 |
-| `order_import_batch_items` | 导入批次 × 订单 快照（原始 JSON Asset、parse_status、normalized_payload） |
-| `order_buyer_assets` | 买家 Logo（原始 + SVG）——订单生产附件，**不属于素材库** |
-| `material_url_bindings` | 买家素材 URL → Variant（人工确认后建立，URL 命中直接复用，不跑图匹配） |
-| `asin_variant_bindings` | Child ASIN → Variant（替代不存在的 Distribution 表定位候选） |
-| `variant_effect_images` | Variant 的最终效果图（FINAL_EFFECT / Black / White），复用已有 Asset |
-| `activity_logs` | target_type 增加 `ORDER_ITEM`（审核记录） |
+| `distribution_tasks` | 一次派发（DerivativeBatch → operator），含派发当时的展示快照字段；`status ∈ ACTIVE/RECEIVED/COMPLETED/CANCELLED` |
+| `distribution_task_items` | 派发当时的「副素材 + Revision」快照（`deliveryRound`），之后 Revision 升级不改变历史交付 |
+| `distribution_parent_asins` | 一个任务一个 Parent ASIN（本身即唯一标识，一个任务一行） |
+| `distribution_child_asins` | 该任务关联的 Child ASIN（订单中心契约检索入口，`child_asin` 建索引） |
 
-### 3. 解析架构与规则（BLADE_SHOES_V1）
+### 2. 派发 / ASIN API
 
-```
-GenericOrderParser → CategoryResolver → ParserRegistry(BLADE_SHOES→BladeShoesParser) → NormalizedOrder
-```
-
-- **GenericOrderParser**：只解析 Amazon 通用结构（orderId/orderItemId/asin/sku/quantity + 图片候选 + 买家附件 + 文字/选项），不放品类业务判断；兼容 `type` 字段（领星真实结构）与 key 名；支持 customizationData（`inputValue`）与 version3.0（`text`）两种文字来源
-- **CategoryResolver**：品类从 SKU 前缀 / ASIN 绑定 / ERP / 设计包分类确定，**不靠图片猜品类**
-- **BladeShoesParser V1**（规则版本 BLADE_SHOES_V1）：
-  - `image_type`：同一 OptionCustomization 节点 `thumbnailImage != overlayImage` → `MATERIAL_SOURCE`（material_url）；`==` 且 Black/White → `FINAL_EFFECT`（final_effect_url + sole_color）；Add Your Logo / Front Blank 入口预览 → `PREVIEW_ONLY`；未知结构 → `UNKNOWN`（REVIEW_REQUIRED），禁止随便取第一张图
-  - 买家 Logo：`ImageCustomization.image.imageName` → buyer_logo_original；version3.0 `ImagePrinting.svgImage` → buyer_logo_svg；不依赖卖家 label（Add Your Logo 等）判断
-  - 文字：Enter Your Name/Number → custom_name/custom_number；明确 Front/BACK → front/back 字段；普通字段不复制到 front/back；buyer_request 统一
-
-### 4. 素材匹配（MaterialMatcher）
-
-- **MATERIAL_SOURCE**：`material_url` → MaterialUrlBinding（已绑定 → URL → Variant → MAT，不跑图匹配）；未绑定 → Child ASIN → 候选 Variant（仅该 ASIN 绑定内）→ ResNet-50 图片匹配 → 命中建 URL 绑定
-- **FINAL_EFFECT**：`final_effect_url` → Child ASIN → 候选 Variant → 该 Variant 的 FINAL_EFFECT 图 → 图片匹配（不与其他素材源图混比）
-- **品类隔离**：`Order.category_code = Candidate.category_code`，不符自动降级 REVIEW_REQUIRED
-- 匹配失败 → REVIEW_REQUIRED / UNMATCHED，交给人工审核
-
-> **冲突说明**：现有系统后端没有 Distribution（派发）表/API（前端 DistributionDetailPage 为 Mock），且没有 ASIN↔Variant 映射。因此「Child ASIN → Distribution/Batch → Variant」链路用 **asin_variant_bindings**（审核确认时建立）替代定位候选，实现同等的「候选隔离、不全库比较」效果。
-
-### 5. 人工审核与销量归因
-
-- 审核状态：CONFIRMED / REVIEW_REQUIRED / UNMATCHED / FAILED；异常审核页支持 确认 / 更换 Variant / 无法识别，全部写 ActivityLog（MATCH_CONFIRMED / MATCH_CHANGED / MATCH_FAILED）
-- 销量：最小单位 OrderItem.quantity；**仅 CONFIRMED 计入**；Variant 销量 = SUM(quantity) WHERE matched_variant_id AND CONFIRMED；MAT 销量 = 该 MAT 下 Variant 汇总；按品类汇总；REVIEW_REQUIRED/UNMATCHED/FAILED 不计入
-
-### 6. API
-
-| 方法 | 路径 | 说明 |
+| 方法 | 路径 | 功能 |
 |---|---|---|
-| POST | `/api/order-imports` | 导入领星 ZIP（保留原始 ZIP/JSON，orderItemId 去重） |
-| GET | `/api/order-imports` | 导入批次列表 |
-| GET | `/api/order-imports/{id}` | 批次详情 |
-| GET | `/api/order-imports/{id}/items` | 批次解析结果（含 normalized payload） |
-| POST | `/api/order-imports/items/{id}/auto-match` | 单个订单自动匹配 |
-| POST | `/api/order-imports/{batch}/auto-match` | 整批自动匹配 |
-| POST | `/api/order-imports/items/{id}/match` | 人工审核（confirm/change/unmatch + variantId） |
-| GET | `/api/order-match/review` | 异常审核列表（REVIEW_REQUIRED/UNMATCHED/FAILED） |
-| GET | `/api/order-sales` | 正式销量（Variant/MAT/品类汇总，仅 CONFIRMED） |
+| POST | `/api/design-packages/{id}/distributions` | 派发当前最新 Batch 给运营（含整套副素材快照） |
+| GET | `/api/design-packages/{id}/distributions` | 该设计包的全部派发任务 |
+| POST | `/api/distributions/{id}/receive` | 运营接收素材 |
+| POST | `/api/distributions/{id}/cancel` | 取消派发 |
+| PUT | `/api/distributions/{id}/asins` | 运营回填 Parent / Child ASIN |
+| GET | `/api/distributions/{id}` | 单个派发任务详情 |
+| POST | `/api/material-variants/{id}/effect-images` | 为 Variant 登记图片角色（复用已有 Asset，`FINAL_EFFECT` 必须区分 BLACK/WHITE） |
+| GET | `/api/material-variants/{id}/effect-images` | 该 Variant 的全部图片角色 |
 
-### 7. 前端
+### 3. 只读契约（对 order-center）
 
-`/orders` 订单识别页（素材中心右上「订单识别」入口）：上传订单 / 导入记录 / 解析结果 / 素材匹配 / 异常审核 / 销量归因 六个视图。
+`GET /api/contract/materials-by-child-asin/{child_asin}`
 
-### 8. 测试与验收
+返回（稳定 DTO，不暴露内部 ORM / 存储键）：
+- `categoryCode`（来自所属设计包）
+- `batch`：`batchId / batchCode / versionNo / categoryCode / designPackageId`
+- `variants[]`：整套 Variant 候选（**不是** Child → 固定单个）：
+  - `variantId / displayCode / materialId / materialCode / categoryCode / batchId`
+  - `images[]`：`MATERIAL_SOURCE`（当前 Revision 源图）+ `FINAL_EFFECT`
+    （`soleColor` 区分 `BLACK` / `WHITE`），均复用已有 Asset / `variant_effect_images`
 
-| 层级 | 结果 |
-|---|---|
-| 后端单测 | 全量通过（新增：test_order_real_structure 8 个真实领星结构解析；test_order_match 4 个 URL绑定/候选隔离/品类隔离/销量/审核；既有 test_order_phase_a_d 7 个） |
-| 浏览器验收（verify-orders.cjs，真实 ZIP 全流程） | **问题清单：无**（上传/导入记录/解析结果表/素材匹配/异常审核/销量页，0 console error） |
-| 既有回归（acceptance / image-search / variant-detail） | 全部 **无** |
-| 真实数据 | 61 单：FINAL_EFFECT 58 / MATERIAL_SOURCE 3，全部 PARSED，55 单有定制文字，sole Black 43/White 15 |
-
-### 9. 未完成项与下一步
-
-- 真实 ZIP 样本里**没有买家 Logo（ImageCustomization）订单**：Logo 解析逻辑已实现并通过构造 fixture 测试，但需要真实带 Logo 的订单样本进一步验证
-- `asin_variant_bindings` 目前靠人工审核建立；后续可接入「Distribution/派发」表实现 ASIN→Batch→Variant 的原生链路
-- FINAL_EFFECT 匹配需要 Variant 的效果图库（variant_effect_images），当前为空——后续上传/学习效果图后自动匹配才能真正命中
-- 订单导入的外层 Excel（订单基础信息）暂未解析（JSON 已含订单号/ASIN 等核心字段）
+契约口径：只从**未取消**派发任务关联里检索；已取消任务不对外提供素材事实。
+未绑定 Child ASIN → `404 CHILD_ASIN_NOT_FOUND`（不返回编造关系）。

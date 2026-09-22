@@ -697,9 +697,9 @@ export default function DesignPackageUploadPage() {
     }
   }
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!activePkgId) return
-    const result = submitAndDispatch(activePkgId, actor)
+    const result = await submitAndDispatch(activePkgId, actor)
     if (result.error) {
       toast.error(result.error)
       return
@@ -1582,17 +1582,14 @@ export default function DesignPackageUploadPage() {
                   <Button
                     className="bg-[#3d3192] hover:bg-[#32277a]"
                     // 归属运营允许只有名字（无 userId），所以不能用 operatorId 作为禁用条件
-                    disabled={overview.submitted || !overview.operatorName || isApiMode()}
+                    // 派发运营已接入真实后端（POST /design-packages/{id}/distributions），真实模式下同样可派发
+                    disabled={overview.submitted || !overview.operatorName}
                     onClick={handleSubmit}
                   >
                     提交并派发
                   </Button>
-                  {isApiMode() && (
-                    <span className="text-xs text-gray-500">
-                      {currentBatch
-                        ? `${currentBatch.code} 已生成；派发运营属 Phase 3，暂不在本阶段开放`
-                        : '需先生成版本；派发运营属 Phase 3'}
-                    </span>
+                  {currentBatch && !overview.submitted && (
+                    <span className="text-xs text-gray-500">{currentBatch.code} 已生成，确认后派发给归属运营</span>
                   )}
                   {!isApiMode() && overview.countCheck.blocked && (
                     <span className="text-xs text-red-600">主副素材数量不一致，禁止直接提交</span>
