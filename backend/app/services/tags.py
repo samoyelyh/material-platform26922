@@ -182,48 +182,96 @@ def _package_history(db: Session, design_package_id: str) -> list[ActivityLog]:
 
 
 def material_history(db: Session, material_code: str) -> list[dict]:
-    """主素材流转记录 = MAT 自身事件 + 引用它的设计包的关键事件。"""
+    """主素材流转记录（以 MAT 为中心，不再塞整个设计包的全部日志）。
+
+    口径：
+      直接事件：MAT 自身（创建/复用/PSD/标签/加入设计包位置）
+      关联事件：该 MAT 的副素材关键事件 + 含这些副素材的 Batch + 相关 Distribution
+      排除低价值内部事件（asset 内部写入 / 指纹索引 / 上传内部失败等）
+    """
     material = get_material_or_404(db, material_code)
 
-    own = db.execute(
-        select(ActivityLog).where(
-            ActivityLog.target_type == "MATERIAL",
-            ActivityLog.target_id == material.id,
-        )
-    ).scalars().all()
-
-    package_ids = [
+    # 该 MAT 的副素材与批次（用于关联事件过滤）
+    variant_ids = [
         row[0]
         for row in db.execute(
-            select(DesignPackageMaterial.design_package_id).where(
-                DesignPackageMaterial.material_id == material.id
-            )
+            select(MaterialVariant.id).where(MaterialVariant.material_id == material.id)
         ).all()
     ]
+    batch_ids = [
+        row[0]
+        for row in db.execute(
+            select(MaterialVariant.batch_id)
+            .where(MaterialVariant.material_id == material.id)
+            .distinct()
+        ).all()
+    ]
+    task_ids = []
+    if batch_ids:
+        task_ids = [
+            row[0]
+            for row in db.execute(
+                select(DistributionTask.id).where(DistributionTask.batch_id.in_(batch_ids))
+            ).all()
+        ]
 
-    seen_ids = {row.id for row in own}
-    merged = list(own)
-    for pkg_id in package_ids:
-        for log in _package_history(db, pkg_id):
-            if log.id in seen_ids:
-                continue
-            seen_ids.add(log.id)
-            merged.append(log)
-    merged.sort(key=lambda log: (log.created_at, log.id))
-    return [_activity_dto(row) for row in merged]
+    scopes: list[tuple[str, list[str]]] = [
+        ("MATERIAL", [material.id]),
+        ("MATERIAL_VARIANT", variant_ids),
+        ("DERIVATIVE_BATCH", batch_ids),
+        ("DISTRIBUTION", task_ids),
+    ]
+    return _entity_history(db, scopes)
 
 
 def variant_history(db: Session, variant_id: str) -> list[dict]:
-    """副素材流转记录 = 该副素材自身的事件。"""
+    """副素材流转记录（以 Variant 为中心）：自身事件 + Batch 归属 + 相关 Distribution。"""
     variant = get_variant_or_404(db, variant_id)
-    rows = db.execute(
-        select(ActivityLog).where(
-            ActivityLog.target_type == "MATERIAL_VARIANT",
-            ActivityLog.target_id == variant.id,
-        )
-    ).scalars().all()
-    rows.sort(key=lambda log: (log.created_at, log.id))
-    return [_activity_dto(row) for row in rows]
+    task_ids = [
+        row[0]
+        for row in db.execute(
+            select(DistributionTask.id).where(DistributionTask.batch_id == variant.batch_id)
+        ).all()
+    ]
+    scopes: list[tuple[str, list[str]]] = [
+        ("MATERIAL_VARIANT", [variant.id]),
+        ("DERIVATIVE_BATCH", [variant.batch_id]),
+        ("DISTRIBUTION", task_ids),
+    ]
+    return _entity_history(db, scopes)
+
+
+# 默认不展示的系统内部低价值事件（asset 内部写入 / 指纹索引 / 上传内部失败 / 图片重索引）
+_LOW_VALUE_ACTIONS = {
+    "CREATE_ASSET",
+    "REUSE_ASSET",
+    "UPLOAD_FAILED",
+    "LINK_ASSET",
+    "IMAGE_INDEX_FAILED",
+    "IMAGE_REINDEXED",
+}
+
+
+def _entity_history(db: Session, scopes: list[tuple[str, list[str]]]) -> list[dict]:
+    """按 (target_type, target_ids) 作用域查询 ActivityLog，实体为中心、去重、排低价值、按时间排序。"""
+    seen: set[str] = set()
+    merged: list[ActivityLog] = []
+    for target_type, target_ids in scopes:
+        if not target_ids:
+            continue
+        rows = db.execute(
+            select(ActivityLog).where(
+                ActivityLog.target_type == target_type,
+                ActivityLog.target_id.in_(target_ids),
+            )
+        ).scalars().all()
+        for row in rows:
+            if row.id in seen or row.action in _LOW_VALUE_ACTIONS:
+                continue
+            seen.add(row.id)
+            merged.append(row)
+    merged.sort(key=lambda log: (log.created_at, log.id))
+    return [_activity_dto(row) for row in merged]
 
 
 def package_history(db: Session, design_package_id: str) -> list[dict]:

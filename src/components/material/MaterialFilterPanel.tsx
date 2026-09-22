@@ -5,7 +5,6 @@ import {
   STYLE_OPTIONS,
   TYPE_OPTIONS,
   UPLOAD_TIME_OPTIONS,
-  UPLOADER_OPTIONS,
   USAGE_OPTIONS,
 } from '@/mock/materials';
 import { API_ENABLED } from '@/services/apiClient';
@@ -86,6 +85,7 @@ export interface FilterValues {
   type: string;
   style: string;
   uploader: string;
+  tag: string;
   uploadTime: string;
   usage: string;
   sort: string;
@@ -96,14 +96,19 @@ interface Props {
   onChange: (patch: Partial<FilterValues>) => void;
   onReset: () => void;
   imageMode: boolean;
+  /** 真实上传人选项（来自后端 /filter-options，替代写死 mock）；未加载时仅显示「全部」 */
+  uploaders?: string[];
+  /** 真实标签选项（来自后端 /filter-options） */
+  tags?: string[];
 }
 
 const toOptions = (arr: string[]): Option[] => arr.map((v) => ({ value: v, label: v }));
 
-export function MaterialFilterPanel({ values, onChange, onReset, imageMode }: Props) {
+export function MaterialFilterPanel({ values, onChange, onReset, imageMode, uploaders, tags }: Props) {
   const hasActive =
     values.type !== '全部' ||
     values.uploader !== '全部' ||
+    values.tag !== '全部' ||
     values.uploadTime !== 'all' ||
     values.usage !== 'all';
 
@@ -114,6 +119,10 @@ export function MaterialFilterPanel({ values, onChange, onReset, imageMode }: Pr
   const sortOptions = API_ENABLED
     ? SORT_OPTIONS.filter((o) => !PHASE3_SORT.has(o.value))
     : SORT_OPTIONS;
+
+  // 上传人 / 标签选项：来自后端真实数据，不写死
+  const uploaderOptions = ['全部', ...(uploaders ?? [])];
+  const tagOptions = ['全部', ...(tags ?? [])];
 
   return (
     <div className="flex flex-wrap items-center justify-end gap-2 px-4 pt-3">
@@ -127,7 +136,8 @@ export function MaterialFilterPanel({ values, onChange, onReset, imageMode }: Pr
         </button>
       )}
       <FilterSelect placeholder="素材类型" value={values.type} options={toOptions(TYPE_OPTIONS)} onChange={(v) => onChange({ type: v })} active={values.type !== '全部'} />
-      <FilterSelect placeholder="上传人" value={values.uploader} options={toOptions(UPLOADER_OPTIONS)} onChange={(v) => onChange({ uploader: v })} active={values.uploader !== '全部'} />
+      <FilterSelect placeholder="上传人" value={values.uploader} options={toOptions(uploaderOptions)} onChange={(v) => onChange({ uploader: v })} active={values.uploader !== '全部'} />
+      <FilterSelect placeholder="标签" value={values.tag} options={toOptions(tagOptions)} onChange={(v) => onChange({ tag: v })} active={values.tag !== '全部'} />
       <FilterSelect placeholder="上传时间" value={values.uploadTime} options={UPLOAD_TIME_OPTIONS} onChange={(v) => onChange({ uploadTime: v })} active={values.uploadTime !== 'all'} />
       <FilterSelect placeholder="使用状态" value={values.usage} options={usageOptions} onChange={(v) => onChange({ usage: v })} active={values.usage !== 'all'} />
       <FilterSelect placeholder="排序" value={values.sort} options={sortOptions} onChange={(v) => onChange({ sort: v })} active={values.sort !== 'latest'} />

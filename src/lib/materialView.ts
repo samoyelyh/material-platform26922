@@ -136,7 +136,8 @@ export function toVariantMaterialView(input: VariantViewInput): MaterialView {
     orders30: 0,
     prevOrders30: 0,
     uploadTime: formatUploadTime(revision?.createdAt ?? variant.createdAt),
-    uploader: revision?.createdBy ?? designPackage?.createdBy ?? '',
+    // 上传人 = 实际上传人（与所属 MAT 的创建人一致），不是建版 actor
+    uploader: mainMaterial?.createdBy ?? revision?.createdBy ?? designPackage?.createdBy ?? '',
     size: '2000 × 2000',
     format: 'JPG',
     fileName: asset?.originalFilename ?? '',

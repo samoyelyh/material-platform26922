@@ -646,6 +646,34 @@ def list_tags(db: Session = Depends(get_db)) -> list[dict]:
     return list_distinct_tags(db)
 
 
+@router.get("/filter-options", summary="素材中心筛选选项（真实数据：上传人 + 标签）")
+def filter_options(db: Session = Depends(get_db)) -> dict:
+    """素材中心筛选下拉的真实数据来源（不写死、不用 Mock）：
+
+    - uploaders：真实存在的「实际上传人」（package_uploads.uploader_name ∪ 未归档 materials.created_by）
+    - tags：真实存在的标签（复用 list_distinct_tags 的聚合：MAT / Variant / Package）
+    """
+    from app.services.tags import list_distinct_tags
+
+    uploader_names = {
+        row[0].strip()
+        for row in db.execute(
+            select(PackageUpload.uploader_name).where(PackageUpload.uploader_name.is_not(None))
+        ).all()
+        if row[0] and row[0].strip()
+    }
+    material_creators = {
+        row[0].strip()
+        for row in db.execute(
+            select(Material.created_by).where(Material.archived_at.is_(None))
+        ).all()
+        if row[0] and row[0].strip()
+    }
+    uploaders = sorted(uploader_names | material_creators)
+    tags = [row["tag"] for row in list_distinct_tags(db)]
+    return {"uploaders": uploaders, "tags": tags}
+
+
 @router.get("/materials", response_model=list[MaterialDTO], summary="主素材列表")
 def list_materials(
     limit: int = 200,

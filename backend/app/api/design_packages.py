@@ -15,7 +15,7 @@ from app.core.errors import (
     DesignPackageNotFound,
     ValidationError,
 )
-from app.db.models import ActivityLog, DerivativeBatch, DesignPackage, DesignPackageMaterial, Material
+from app.db.models import ActivityLog, DerivativeBatch, DesignPackage, DesignPackageMaterial, Material, MaterialVariant
 from app.db.session import get_db
 from app.schemas.dto import (
     CreateUploadRequest,
@@ -503,10 +503,11 @@ def list_package_uploads(
 
 
 def _sync_new_tags_to_materials(db: Session, pkg: DesignPackage, new_tags: list[str], actor: str) -> None:
-    """把「这次新增的设计包标签」补到包内全部主素材（副素材不碰——建版时已继承）。
+    """把「这次新增的设计包标签」同步到包内全部主素材 + 副素材（Material + Variant）。
 
-    这是用户主动选择的同步（勾选「同步新增标签到包内素材」），
-    不是修改设计包标签时的自动覆盖。
+    业务规则（P1）：给设计包新增标签时，它当前关联的 Material / Variant 都应同步拥有这些标签。
+    这是一次性的「新增同步」（只加不减），同步后素材标签仍允许独立维护；
+    不做级联删除（Package 删标签不强制删素材已有标签）。
     """
     from app.services.tags import normalize_tags, set_tags
 
@@ -518,16 +519,42 @@ def _sync_new_tags_to_materials(db: Session, pkg: DesignPackage, new_tags: list[
             )
         ).all()
     ]
-    if not material_ids:
-        return
-    materials = db.execute(select(Material).where(Material.id.in_(material_ids))).scalars().all()
-    for material in materials:
-        current = normalize_tags(list(material.tags or []))
+    if material_ids:
+        materials = db.execute(select(Material).where(Material.id.in_(material_ids))).scalars().all()
+        for material in materials:
+            current = normalize_tags(list(material.tags or []))
+            merged = normalize_tags([*current, *new_tags])
+            if merged != current:
+                set_tags(
+                    db,
+                    target=material,
+                    tags=merged,
+                    actor=actor,
+                    action="BATCH_ADD_TAG",
+                    design_package_id=pkg.id,
+                )
+
+    # 副素材也同步（之前只同步主素材，导致 Package 打标签后 Variant 筛不到）
+    variants = list(
+        db.execute(
+            select(MaterialVariant)
+            .join(
+                DesignPackageMaterial,
+                DesignPackageMaterial.id == MaterialVariant.design_package_material_id,
+            )
+            .where(
+                DesignPackageMaterial.design_package_id == pkg.id,
+                MaterialVariant.deleted.is_(False),
+            )
+        ).scalars()
+    )
+    for variant in variants:
+        current = normalize_tags(list(variant.tags or []))
         merged = normalize_tags([*current, *new_tags])
         if merged != current:
             set_tags(
                 db,
-                target=material,
+                target=variant,
                 tags=merged,
                 actor=actor,
                 action="BATCH_ADD_TAG",

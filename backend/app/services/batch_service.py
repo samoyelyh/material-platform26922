@@ -199,6 +199,11 @@ def create_batch(
     existing_by_position = _existing_variants_by_position(
         db, [dto.designPackageMaterialId for dto in dtos]
     )
+    # 同一 MAT 的既有副素材（跨设计包 / 跨版本，未删除），用于跨包复用去重：
+    # 重新上传完全相同的主+副素材时，复用已有 MAT 与已有副素材，不重复创建（P0 修复）。
+    existing_by_material = _existing_variants_by_material(
+        db, list({dto.materialId for dto in dtos})
+    )
 
     for dto in dtos:
         asset = db.get(Asset, dto.variantAssetId or "")
@@ -210,6 +215,11 @@ def create_batch(
             raise PairingIncomplete(f"设计包位置 {dto.position} 已不存在")
 
         reusable = _find_reusable_variant(db, existing_by_position.get(position_row.id, []), asset)
+        if reusable is None:
+            # 跨设计包：同一 MAT 已有「内容完全相同」的副素材 → 复用，不新建
+            reusable = _find_reusable_variant(
+                db, existing_by_material.get(dto.materialId, []), asset
+            )
 
         if reusable is not None:
             # 内容与已有副素材完全相同：不新建实体，本版本直接引用它
@@ -334,6 +344,29 @@ def _existing_variants_by_position(
     grouped: dict[str, list[MaterialVariant]] = {}
     for variant in rows:
         grouped.setdefault(variant.design_package_material_id, []).append(variant)
+    return grouped
+
+
+def _existing_variants_by_material(
+    db: Session, material_ids: list[str]
+) -> dict[str, list[MaterialVariant]]:
+    """同一 MAT 的全部未删除副素材（跨设计包 / 跨版本），按 material_id 分组。
+
+    用于跨设计包去重：重新上传完全相同的副素材时，复用已有 MAT 的已有副素材。
+    """
+    if not material_ids:
+        return {}
+    rows = db.execute(
+        select(MaterialVariant)
+        .where(
+            MaterialVariant.material_id.in_(material_ids),
+            MaterialVariant.deleted.is_(False),
+        )
+        .order_by(MaterialVariant.created_at.asc())
+    ).scalars()
+    grouped: dict[str, list[MaterialVariant]] = {}
+    for variant in rows:
+        grouped.setdefault(variant.material_id, []).append(variant)
     return grouped
 
 

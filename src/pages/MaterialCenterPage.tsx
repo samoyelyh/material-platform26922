@@ -33,6 +33,7 @@ const DEFAULT_FILTERS: FilterValues = {
   type: '全部',
   style: '全部',
   uploader: '全部',
+  tag: '全部',
   uploadTime: 'all',
   usage: 'all',
   sort: 'latest',
@@ -67,9 +68,16 @@ export default function MaterialCenterPage() {
   const [searchDesignPackage, setSearchDesignPackage] = useState('');
   /** 标签选择器数据（全库去重标签） */
   const [allTags, setAllTags] = useState<{ tag: string; count: number }[]>([]);
+  /** 上传人 / 标签筛选选项（来自后端真实数据 /filter-options，替代写死 mock） */
+  const [filterUploaders, setFilterUploaders] = useState<string[]>([]);
+  const [filterTags, setFilterTags] = useState<string[]>([]);
   useEffect(() => {
     if (!API_ENABLED) return;
     void materialApi.listTags().then(setAllTags).catch(() => {});
+    void materialApi.getFilterOptions().then((opts) => {
+      setFilterUploaders(opts.uploaders ?? []);
+      setFilterTags(opts.tags ?? []);
+    }).catch(() => {});
   }, []);
   const [drawerMaterial, setDrawerMaterial] = useState<Material | null>(null);
   /** 打开抽屉时直接进入的副素材详情（副素材卡片 / 主素材卡片上的副素材缩略图） */
@@ -457,6 +465,8 @@ export default function MaterialCenterPage() {
     if (filters.type !== '全部') list = list.filter((m) => m.type === filters.type);
     if (filters.style !== '全部') list = list.filter((m) => m.styles.includes(filters.style));
     if (filters.uploader !== '全部') list = list.filter((m) => m.uploader === filters.uploader);
+    // 标签筛选：查素材自身真实标签（MAT.tags / Variant.tags），不是 DesignPackage.tags
+    if (filters.tag !== '全部') list = list.filter((m) => m.tags.includes(filters.tag));
     if (filters.uploadTime !== 'all') {
       const days = { '7d': 7, '30d': 30, '90d': 90, '180d': 180 }[filters.uploadTime] ?? 0;
       const cutoff = new Date();
@@ -561,6 +571,8 @@ export default function MaterialCenterPage() {
             onChange={patchFilters}
             onReset={resetFilters}
             imageMode={imageMode}
+            uploaders={filterUploaders}
+            tags={filterTags}
           />
           <MaterialCategoryFilter
             selected={scenes}

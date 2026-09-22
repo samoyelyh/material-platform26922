@@ -1246,6 +1246,9 @@ export const materialApi = {
   /** 全库去重标签（标签选择器用） */
   listTags: () => request<{ tag: string; count: number }[]>('/tags'),
 
+  /** 素材中心筛选选项（真实数据：上传人 + 标签），替代写死的 mock 列表 */
+  getFilterOptions: () => request<{ uploaders: string[]; tags: string[] }>('/filter-options'),
+
   /** 整组替换某个素材的标签 */
   patchMaterialTags: (materialCode: string, tags: string[], actor?: string) =>
     request<MaterialDto>(`/materials/${encodeURIComponent(materialCode)}/tags`, jsonInit('PATCH', { tags, actor })),
