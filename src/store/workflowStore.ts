@@ -367,6 +367,15 @@ export async function deletePackageFromApi(packageId: string, actor: string) {
   dropPackageFromStore(packageId)
 }
 
+/**
+ * 永久删除设计包（物理删除自身数据，共享 MAT/Asset 保留，不可恢复）。
+ * 后端在「副素材被其它设计包引用」时返回 409（错误会上抛给调用方提示）。
+ */
+export async function deletePackagePermanentFromApi(packageId: string, actor: string) {
+  await materialApi.deleteDesignPackagePermanent(packageId, actor)
+  dropPackageFromStore(packageId)
+}
+
 /** 恢复被删除（归档）的设计包，并重新 hydrate */
 export async function restorePackageFromApi(packageId: string) {
   await materialApi.restoreDesignPackage(packageId)

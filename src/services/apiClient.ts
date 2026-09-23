@@ -904,6 +904,15 @@ export const materialApi = {
     )
   },
 
+  /** 永久删除设计包（物理删除自身数据；共享 MAT/Asset 保留；被其它包引用时后端 409） */
+  deleteDesignPackagePermanent: (id: string, actor?: string) => {
+    const search = actor ? `?actor=${encodeURIComponent(actor)}` : ''
+    return request<{ deleted: boolean; id: string; name: string; permanent: boolean }>(
+      `/design-packages/${encodeURIComponent(id)}/permanent${search}`,
+      { method: 'DELETE' },
+    )
+  },
+
   /** 设计编码 / 设计美工 / 负责人 / 标签 / 备注允许事后手工修改 */
   patchDesignPackage: (
     id: string,

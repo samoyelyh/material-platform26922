@@ -15,6 +15,7 @@ import { CATEGORY_TREE } from '@/mock/materials';
 import {
   batchTagsFromApi,
   deletePackageFromApi,
+  deletePackagePermanentFromApi,
   getDesignPackageGroups,
   getDesignsOfMaterial,
   getMaterials,
@@ -832,6 +833,23 @@ export default function MaterialCenterPage() {
                   await refreshArchived();
                 } catch (error) {
                   toast.error(error instanceof Error ? error.message : '删除设计包失败');
+                }
+              }}
+              onDeletePackagePermanent={async (group) => {
+                try {
+                  await deletePackagePermanentFromApi(group.pkg.id, '素材中心');
+                  setExpandedPackages((prev) => {
+                    const next = new Set(prev);
+                    next.delete(group.pkg.id);
+                    return next;
+                  });
+                  setDrawerMaterial(null);
+                  toast.success(`已永久删除设计包「${group.pkg.name}」（共享 MAT / 文件已保留）`);
+                  await refreshArchived();
+                  await reloadAllPackagesFromApi();
+                } catch (error) {
+                  toast.error(error instanceof Error ? error.message : '永久删除失败');
+                  throw error;
                 }
               }}
               archived={archivedPackages}

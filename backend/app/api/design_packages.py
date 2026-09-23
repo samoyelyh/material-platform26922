@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, Query
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -15,7 +16,17 @@ from app.core.errors import (
     DesignPackageNotFound,
     ValidationError,
 )
-from app.db.models import ActivityLog, DerivativeBatch, DesignPackage, DesignPackageMaterial, Material, MaterialVariant
+from app.db.models import (
+    ActivityLog,
+    DerivativeBatch,
+    DesignPackage,
+    DesignPackageMaterial,
+    DistributionTask,
+    DistributionTaskItem,
+    Material,
+    MaterialPairing,
+    MaterialVariant,
+)
 from app.db.session import get_db
 from app.schemas.dto import (
     CreateUploadRequest,
@@ -318,6 +329,79 @@ def restore_design_package(
         db.commit()
         db.refresh(pkg)
     return to_package_dto(db, pkg)
+
+
+class PackageReferencedConflict(ConflictError):
+    code = "PACKAGE_REFERENCED"
+    default_message = "该设计包的素材被其它设计包引用，不能永久删除"
+
+
+@router.delete(
+    "/design-packages/{design_package_id}/permanent",
+    response_model=dict,
+    summary="永久删除设计包（物理删除自身数据；共享 MAT / Asset 保留）",
+    description=(
+        "物理删除该设计包及其自身数据（位置 / 上架版本 / 副素材 / Revision / 上传记录 / "
+        "配对 / 派发任务 / 维护记录链接）。共享的主素材 MAT 与文件 Asset 一律保留（它们可能"
+        "被其它设计包复用）。\n\n"
+        "安全检查：若本包的副素材被其它设计包（通过完全相同内容复用 / 派发快照）引用，"
+        "为避免破坏其它包，拒绝删除并返回 409，请先归档。"
+    ),
+)
+def delete_design_package_permanent(
+    design_package_id: str,
+    actor: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+) -> dict:
+    pkg = db.get(DesignPackage, design_package_id)
+    if pkg is None:
+        raise DesignPackageNotFound()
+
+    # 本包全部副素材 id
+    variant_ids = [
+        row[0]
+        for row in db.execute(
+            select(MaterialVariant.id)
+            .join(
+                DesignPackageMaterial,
+                DesignPackageMaterial.id == MaterialVariant.design_package_material_id,
+            )
+            .where(DesignPackageMaterial.design_package_id == pkg.id)
+        ).all()
+    ]
+
+    # 安全检查：本包副素材是否被「其它设计包」引用（去重复用配对 / 派发快照）
+    if variant_ids:
+        referenced_pairing = db.execute(
+            select(MaterialPairing.id)
+            .where(
+                MaterialPairing.variant_id.in_(variant_ids),
+                MaterialPairing.design_package_id != pkg.id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        referenced_delivery = db.execute(
+            select(DistributionTaskItem.id)
+            .join(DistributionTask, DistributionTask.id == DistributionTaskItem.distribution_task_id)
+            .where(
+                DistributionTaskItem.variant_id.in_(variant_ids),
+                DistributionTask.design_package_id != pkg.id,
+            )
+            .limit(1)
+        ).scalar_one_or_none()
+        if referenced_pairing is not None or referenced_delivery is not None:
+            raise PackageReferencedConflict(
+                f"设计包「{pkg.name}」的副素材被其它设计包引用（完全相同素材复用或派发快照），"
+                "永久删除会破坏其它包；请改用「删除（归档）」。"
+            )
+
+    name = pkg.name
+    # 物理删除：DB 外键 ON DELETE CASCADE 级联删除位置 / 批次 / 副素材 / Revision /
+    # 上传 / 配对 / 派发任务等子行；共享 MAT 与 Asset 不受影响（无到 design_package 的级联）；
+    # activity_logs.design_package_id 按外键 SET NULL（保留为孤立记录，不阻塞删除）。
+    db.execute(sa_delete(DesignPackage).where(DesignPackage.id == design_package_id))
+    db.commit()
+    return {"deleted": True, "id": design_package_id, "name": name, "permanent": True}
 
 
 @router.get(

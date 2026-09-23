@@ -18,6 +18,8 @@ interface Props {
   onOpenMaterial: (materialCode: string) => void
   /** 删除（软删除 / 归档）设计包；返回 Promise 以便按钮显示进行中 */
   onDeletePackage?: (group: DesignPackageGroupView) => Promise<void>
+  /** 永久删除设计包（物理删除自身数据，共享 MAT/Asset 保留，不可恢复）；后端 409 时错误会上抛 */
+  onDeletePackagePermanent?: (group: DesignPackageGroupView) => Promise<void>
   /** 已删除（归档）的设计包 */
   archived?: ArchivedPackageView[]
   onRestorePackage?: (pkg: ArchivedPackageView) => Promise<void>
@@ -27,7 +29,8 @@ interface Props {
  * 第二十五条：按设计包折叠。
  * 折叠时只显示该设计包第一个主素材作为封面，并展示 主素材/副素材/上架版本 数量。
  *
- * 每个设计包可以直接删除（软删除 / 归档：列表不再显示，数据保留可恢复）。
+ * 每个设计包可以直接删除（软删除 / 归档：列表不再显示，数据保留可恢复）；
+ * 也可以永久删除（物理删除自身数据，共享 MAT/Asset 保留，不可恢复）。
  */
 export function MaterialPackageGroups({
   groups,
@@ -35,11 +38,13 @@ export function MaterialPackageGroups({
   onToggle,
   onOpenMaterial,
   onDeletePackage,
+  onDeletePackagePermanent,
   archived = [],
   onRestorePackage,
 }: Props) {
   const [pending, setPending] = useState('')
   const [confirm, setConfirm] = useState<DesignPackageGroupView | null>(null)
+  const [confirmPermanent, setConfirmPermanent] = useState<DesignPackageGroupView | null>(null)
   const [showArchived, setShowArchived] = useState(false)
 
   if (!groups.length) {
@@ -151,6 +156,17 @@ export function MaterialPackageGroups({
                   删除
                 </button>
               )}
+              {onDeletePackagePermanent && (
+                <button
+                  onClick={() => setConfirmPermanent(group)}
+                  disabled={pending === group.pkg.id}
+                  title="永久删除设计包（物理删除自身数据，共享 MAT/Asset 保留，不可恢复）"
+                  className="flex shrink-0 items-center gap-1 rounded border border-red-400 bg-red-50 px-2 py-1 text-[11px] font-medium text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  永久删除
+                </button>
+              )}
             </div>
 
             {isOpen && (
@@ -222,6 +238,49 @@ export function MaterialPackageGroups({
                 className="rounded bg-red-500 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-600"
               >
                 删除（可恢复）
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 永久删除确认：物理删除自身数据，共享 MAT/Asset 保留，不可恢复 */}
+      {confirmPermanent && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setConfirmPermanent(null)} />
+          <div className="relative w-[440px] max-w-[92vw] rounded-lg bg-white p-5 shadow-2xl">
+            <h3 className="text-sm font-semibold text-red-600">永久删除设计包「{confirmPermanent.pkg.name}」？</h3>
+            <ul className="mt-2 space-y-1 text-xs text-gray-600">
+              <li>· 这是**物理删除，不可恢复**：该设计包的位置 / 上架版本 / 副素材 / Revision / 上传记录 / 配对 / 派发任务都会被删除</li>
+              <li>
+                · 共享的主素材 MAT（{confirmPermanent.mainMaterialCount} 个）与文件 Asset **不会被删除**
+                （它们可能被其它设计包复用）
+              </li>
+              <li>· 若该包的副素材被其它设计包引用（完全相同素材复用 / 派发快照），后端会拒绝删除（409）</li>
+              <li>· 如果只是想隐藏，请用「删除（可恢复）」</li>
+            </ul>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmPermanent(null)}
+                className="rounded border border-gray-300 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={async () => {
+                  const target = confirmPermanent
+                  setConfirmPermanent(null)
+                  if (!onDeletePackagePermanent) return
+                  setPending(target.pkg.id)
+                  try {
+                    await onDeletePackagePermanent(target)
+                  } finally {
+                    setPending('')
+                  }
+                }}
+                className="rounded bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-700"
+              >
+                永久删除（不可恢复）
               </button>
             </div>
           </div>
