@@ -138,6 +138,16 @@ export default function DesignPackageUploadPage() {
   const [uploadState, setUploadState] = useState<'IDLE' | 'UPLOADED' | 'MATCHED'>('IDLE')
   const [lastUploadSummary, setLastUploadSummary] = useState('')
   const [creatingBatch, setCreatingBatch] = useState(false)
+  /** 跨 MAT 副素材冲突明细（建版被禁止时展示），结构见后端 VARIANT_ALREADY_BELONGS_TO_OTHER_MATERIAL */
+  const [variantConflicts, setVariantConflicts] = useState<Array<{
+    assetId: string
+    pairKey: string
+    filename: string
+    existingVariantCode: string
+    existingMaterialCode: string
+    existingMaterialId: string
+    currentMaterialId: string
+  }>>([])
   /** 上传前检查面板：用户确认后才真正写入 */
   const [showPreCheck, setShowPreCheck] = useState(false)
   /** 上传成功后的下一步入口 */
@@ -624,6 +634,7 @@ export default function DesignPackageUploadPage() {
     }
     setCreatingBatch(true)
     setBlockReason('')
+    setVariantConflicts([])
     try {
       const batch = await createBatchApi(
         activePkgId,
@@ -638,9 +649,17 @@ export default function DesignPackageUploadPage() {
         { duration: 10000 },
       )
     } catch (error) {
-      const message = error instanceof ApiError ? error.message : '生成版本失败'
-      setBlockReason(message)
-      toast.error(message, { duration: 10000 })
+      // 跨 MAT 副素材冲突：后端返回 VARIANT_ALREADY_BELONGS_TO_OTHER_MATERIAL + detail.conflicts
+      const detail = error instanceof ApiError ? (error.detail as { conflicts?: typeof variantConflicts } | null) : null
+      if (error instanceof ApiError && error.code === 'VARIANT_ALREADY_BELONGS_TO_OTHER_MATERIAL' && detail?.conflicts) {
+        setVariantConflicts(detail.conflicts)
+        setBlockReason('存在跨 MAT 副素材冲突，已禁止建版')
+        toast.error('存在跨 MAT 副素材冲突，已禁止建版（详见下方冲突明细）', { duration: 10000 })
+      } else {
+        const message = error instanceof ApiError ? error.message : '生成版本失败'
+        setBlockReason(message)
+        toast.error(message, { duration: 10000 })
+      }
     } finally {
       setCreatingBatch(false)
     }
@@ -1378,6 +1397,35 @@ export default function DesignPackageUploadPage() {
                   </div>
                 ) : (
                   <MaterialPairingTable pairings={pairingList} onModify={setSelected} />
+                )}
+
+                {/* 跨 MAT 副素材冲突明细（禁止建版时展示，不静默跳过） */}
+                {variantConflicts.length > 0 && (
+                  <div className="rounded-md border border-red-300 bg-red-50/70 px-3 py-3">
+                    <div className="flex items-center gap-2 text-xs font-semibold text-red-700">
+                      存在 {variantConflicts.length} 张副素材跨 MAT 冲突 —— 已禁止建版
+                    </div>
+                    <p className="mt-1 text-[11px] text-red-600">
+                      一个副素材只能归属于一个主素材（禁止跨 MAT 归属）。以下副素材已属于其它主素材，本次未录入：
+                    </p>
+                    <ul className="mt-2 space-y-2">
+                      {variantConflicts.map((c) => (
+                        <li key={c.assetId} className="rounded border border-red-200 bg-white px-2.5 py-2 text-xs">
+                          <div className="font-medium text-gray-800">
+                            副素材 {c.filename}
+                            {c.pairKey ? <span className="ml-1 text-gray-400">（pairKey {c.pairKey}）</span> : null}
+                          </div>
+                          <div className="mt-1 text-[11px] text-gray-600">
+                            已归属于：<span className="font-medium text-red-600">{c.existingMaterialCode} / Variant {c.existingVariantCode}</span>
+                          </div>
+                          <div className="text-[11px] text-gray-500">本次未录入（禁止同一副素材跨 MAT 归属）。</div>
+                        </li>
+                      ))}
+                    </ul>
+                    <p className="mt-2 text-[11px] text-gray-500">
+                      处理建议：确认副素材是否选错主素材；若它确实属于上面那个主素材，请从本包移除该副图后重新生成。
+                    </p>
+                  </div>
                 )}
 
                 {/* 确认整包并生成版本 */}

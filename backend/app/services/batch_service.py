@@ -36,6 +36,7 @@ from app.core.errors import (
     PairingIncomplete,
     UploadNotFound,
     ValidationError,
+    VariantBelongsToOtherMaterial,
 )
 from app.db.models import (
     Asset,
@@ -210,6 +211,15 @@ def create_batch(
     _auto_pair_and_confirm(db, design_package_id, upload.id, actor=actor)
 
     upload, dtos = validate_ready_for_batch(db, design_package_id, upload_id)
+
+    # 跨 MAT 副素材冲突检测（禁止副素材跨 MAT 归属）：
+    # 同内容副素材已归属其它 MAT → 整包禁止建版，结构化返回冲突明细，不静默跳过。
+    conflicts = _detect_cross_mat_conflicts(db, dtos)
+    if conflicts:
+        raise VariantBelongsToOtherMaterial(
+            f"有 {len(conflicts)} 张副素材已归属于其它主素材，禁止跨 MAT 归属（未建版）",
+            detail={"conflicts": conflicts},
+        )
 
     version_no = next_version_no(db, design_package_id)
     batch = DerivativeBatch(
@@ -403,6 +413,71 @@ def _existing_variants_by_material(
     for variant in rows:
         grouped.setdefault(variant.material_id, []).append(variant)
     return grouped
+
+
+def _find_conflicting_variants(
+    db: Session, asset: Asset, current_material_id: str
+) -> list[MaterialVariant]:
+    """同内容副素材已归属**其它** MAT 的副素材（跨 MAT 归属冲突）。
+
+    业务规则：一个副素材 Variant 只能归属于一个 MAT。
+    相同内容（同 Asset id 或同 BLAKE3）且 material_id != current_material_id → 冲突。
+    """
+    stmt = (
+        select(MaterialVariant, VariantRevision, Asset)
+        .join(VariantRevision, VariantRevision.id == MaterialVariant.current_revision_id)
+        .join(Asset, Asset.id == VariantRevision.asset_id)
+        .where(
+            MaterialVariant.deleted.is_(False),
+            MaterialVariant.material_id != current_material_id,
+            VariantRevision.deleted.is_(False),
+        )
+    )
+    out: list[MaterialVariant] = []
+    for variant, revision, cur_asset in db.execute(stmt).all():
+        if revision.asset_id == asset.id:
+            out.append(variant)
+        elif asset.blake3 and cur_asset.blake3 == asset.blake3:
+            out.append(variant)
+    return out
+
+
+def _detect_cross_mat_conflicts(db: Session, dtos: list[MaterialPairingDTO]) -> list[dict]:
+    """扫描本次建版全部配对：同内容副素材已归属其它 MAT → 冲突列表（结构化）。
+
+    三种情况（正式规则矩阵）：
+      - 同 MAT + 同副素材        → 复用（不冲突）
+      - 不同 MAT + 同副素材      → CONFLICT（本函数返回）
+      - 未找到已有副素材          → 正常新建（不冲突）
+    """
+    conflicts: list[dict] = []
+    for dto in dtos:
+        if not dto.variantAssetId:
+            continue
+        asset = db.get(Asset, dto.variantAssetId)
+        if asset is None:
+            continue
+        others = _find_conflicting_variants(db, asset, dto.materialId)
+        if not others:
+            continue
+        other = others[0]
+        other_mat = db.get(Material, other.material_id)
+        conflicts.append(
+            {
+                "reason": "VARIANT_ALREADY_BELONGS_TO_OTHER_MATERIAL",
+                "status": "CONFLICT",
+                "assetId": asset.id,
+                "pairKey": dto.pairKey,
+                "filename": asset.original_filename,
+                "position": dto.position,
+                "existingVariantId": other.id,
+                "existingVariantCode": other.display_code,
+                "existingMaterialId": other.material_id,
+                "existingMaterialCode": other_mat.material_code if other_mat else "",
+                "currentMaterialId": dto.materialId,
+            }
+        )
+    return conflicts
 
 
 def _find_reusable_variant(

@@ -125,6 +125,13 @@ class ArchivedPackageError(ConflictError):
     default_message = "设计包已归档，不能继续上传"
 
 
+class VariantBelongsToOtherMaterial(ConflictError):
+    """同内容副素材已归属于其它 MAT，禁止跨 MAT 归属（禁止创建/复用/覆盖）。"""
+
+    code = "VARIANT_ALREADY_BELONGS_TO_OTHER_MATERIAL"
+    default_message = "副素材已归属于其它主素材，禁止跨 MAT 归属"
+
+
 # ---------------------------------------------------------------- 400 校验
 
 
