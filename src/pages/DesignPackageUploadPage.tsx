@@ -13,7 +13,6 @@ import { MaterialPairingTable } from '@/components/material/MaterialPairingTable
 import { TagPicker } from '@/components/material/TagPicker'
 import { formatDateTime } from '@/lib/workflow'
 import {
-  confirmAllPairings,
   confirmPairing,
   getPackageOverview,
   getWorkflowState,
@@ -38,7 +37,6 @@ import {
   reassignPairingApi,
   refreshPackageFromApi,
   recheckBackendHealth,
-  runPairingApi,
   submitDesignPackageToApi,
   type BackendHealthResult,
 } from '@/services/phase1UploadApi'
@@ -611,61 +609,6 @@ export default function DesignPackageUploadPage() {
     }
   }
 
-  /** 按同名 pairKey 重新配对（手动重跑；人工修改过的行不会被覆盖） */
-  const handleRunPairing = async () => {
-    if (!activePkgId) return
-    if (!isApiMode()) {
-      runPackagePairing(activePkgId)
-      setUploadState('MATCHED')
-      return
-    }
-    const uploadId = overview?.pairingUploadId ?? overview?.upload?.id
-    if (!uploadId) {
-      toast.error('还没有上传记录，请先上传主素材与同名副素材')
-      return
-    }
-    setProcessing(true)
-    setProgressText('正在按同名 pairKey 配对…')
-    try {
-      const result = await runPairingApi(uploadId, uploader.trim() || actor)
-      await refreshPackageFromApi(activePkgId)
-      setUploadState('MATCHED')
-      setBlockReason('')
-      toast.success(
-        `配对完成：已配对 ${result.pairedCount} 个、缺副图 ${result.unpairedCount} 个`,
-        { duration: 8000 },
-      )
-    } catch (error) {
-      const message = error instanceof ApiError ? error.message : '配对失败'
-      setBlockReason(message)
-      toast.error(message)
-    } finally {
-      setProcessing(false)
-      setProgressText('')
-    }
-  }
-
-  /** 确认整包配对 */
-  const handleConfirmAllPairings = async () => {
-    if (!activePkgId) return
-    if (!isApiMode()) {
-      const count = confirmAllPairings(activePkgId, actor)
-      if (count) toast.success(`已确认 ${count} 条配对`)
-      else toast.info('没有可确认的配对')
-      return
-    }
-    const uploadId = overview?.pairingUploadId ?? overview?.upload?.id
-    if (!uploadId) return
-    try {
-      const count = await confirmPairingsApi(uploadId, uploader.trim() || actor)
-      await refreshPackageFromApi(activePkgId)
-      if (count) toast.success(`已确认 ${count} 条配对`)
-      else toast.info('没有可确认的配对')
-    } catch (error) {
-      toast.error(error instanceof ApiError ? error.message : '确认失败')
-    }
-  }
-
   /** 确认整包并生成下一版（第一次即 V1）—— 与「上传成功」严格分开（第三十二条） */
   const handleCreateBatch = async () => {
     if (!activePkgId || !overview) return
@@ -733,7 +676,6 @@ export default function DesignPackageUploadPage() {
   const pairingSummaryText = pairingList.length
     ? `${confirmedCount} / ${pairingList.length} 已确认`
     : '还没有跑过配对'
-  const allConfirmed = Boolean(pairingList.length) && confirmedCount === pairingList.length
   const currentBatch = overview?.currentBatch ?? null
   /** 暂存区 + 必填项还没凑齐时，把这些原因显示在按钮旁边 */
   const stagedBlockers = staged.length > 0 ? collectBlockers() : []
@@ -1208,18 +1150,7 @@ export default function DesignPackageUploadPage() {
 
                   {/* 上传完成后：明确区分「上传完成」与「生成 V1」（第三十二条） */}
                   {overview && uploadState !== 'IDLE' && (
-                    <>
-                      <StatusBadge tone="green">上传完成</StatusBadge>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={processing}
-                        onClick={() => void handleRunPairing()}
-                      >
-                        <WandSparkles className="h-3.5 w-3.5" />
-                        {pairingList.length ? '重新配对' : '开始配对'}
-                      </Button>
-                    </>
+                    <StatusBadge tone="green">上传完成</StatusBadge>
                   )}
                 </div>
                 {lastUploadSummary && uploadState !== 'IDLE' && (
@@ -1426,30 +1357,18 @@ export default function DesignPackageUploadPage() {
                       <StatusBadge tone="purple">
                         已配对 {pairedCount} / {pairingList.length}
                       </StatusBadge>
-                      <StatusBadge tone="green">已确认 {confirmedCount}</StatusBadge>
                       {missingCount > 0 && <StatusBadge tone="amber">缺副图 {missingCount}</StatusBadge>}
                     </>
                   )}
-                  <Button size="sm" variant="outline" disabled={processing} onClick={() => void handleRunPairing()}>
-                    <WandSparkles className="h-3.5 w-3.5" />
-                    {pairingList.length ? '重新配对' : '开始配对'}
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={!pairingList.length}
-                    onClick={() => void handleConfirmAllPairings()}
-                  >
-                    确认全部配对
-                  </Button>
+                  <span className="text-[11px] text-gray-400">生成版本时按同名 pairKey 自动配对</span>
                 </div>
               </CardHeader>
               <CardContent className="space-y-3">
                 {pairingList.length === 0 ? (
                   <div className="rounded-md bg-gray-50 px-3 py-6 text-center text-xs text-gray-500">
                     {overview.uploadedFiles.variantCount === 0
-                      ? '本次上传还没有副素材。请上传与主素材同名的副图（例如主素材 1.jpg 对应副素材 1.jpg），再点「开始配对」。'
-                      : '还没有配对结果，点右上角「开始配对」。'}
+                      ? '本次上传还没有副素材。请上传与主素材同名的副图（例如主素材 1.jpg 对应副素材 1.jpg），然后直接「生成版本」。'
+                      : '生成版本时会按同名 pairKey 自动配对，配对结果显示在这里。'}
                   </div>
                 ) : (
                   <MaterialPairingTable pairings={pairingList} onModify={setSelected} />
@@ -1469,24 +1388,19 @@ export default function DesignPackageUploadPage() {
                   </div>
                   <Button
                     className="ml-auto bg-[#3d3192] hover:bg-[#32277a]"
-                    disabled={creatingBatch || overview.countCheck.blocked || !allConfirmed}
+                    disabled={creatingBatch || overview.countCheck.blocked}
                     onClick={() => void handleCreateBatch()}
                   >
                     <PackagePlus className="h-4 w-4" />
                     {creatingBatch
                       ? '正在生成…'
                       : currentBatch
-                        ? `确认整包并生成 V${currentBatch.versionNo + 1}`
-                        : '确认整包并生成 V1'}
+                        ? `生成 V${currentBatch.versionNo + 1}`
+                        : '生成 V1'}
                   </Button>
                   {/* 按钮禁用原因必须写出来，不能让用户猜 */}
                   {overview.countCheck.blocked && (
                     <span className="text-red-600">主素材与副图数量不一致，禁止生成版本</span>
-                  )}
-                  {!overview.countCheck.blocked && !allConfirmed && pairingList.length > 0 && (
-                    <span className="text-amber-700">
-                      还有 {pairingList.length - confirmedCount} 个位置未确认配对
-                    </span>
                   )}
                   {overview.blockingAnomalies.length > 0 && (
                     <span className="text-red-600">
@@ -1697,8 +1611,8 @@ export default function DesignPackageUploadPage() {
                   className="bg-[#3d3192] hover:bg-[#32277a]"
                   onClick={() => {
                     setShowSuccessPanel(false)
-                    // 配对已全部确认时直接生成；否则页面底部有「确认整包并生成 V1」
-                    void handleConfirmAllPairings().then(() => void handleCreateBatch())
+                    // 生成版本时后端按同名 pairKey 自动配对 + 自动确认，无需人工配对步骤
+                    void handleCreateBatch()
                   }}
                 >
                   生成 V1

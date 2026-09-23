@@ -157,6 +157,25 @@ def validate_ready_for_batch(
     return upload, dtos
 
 
+def _auto_pair_and_confirm(db: Session, design_package_id: str, upload_id: str | None, *, actor: str) -> None:
+    """自动配对 + 自动确认（已去掉人工配对步骤）。
+
+    按同名 pairKey 自动配对并自动确认，让「上传 → 生成版本」不再需要人工看配对表/点确认。
+    - 配对只按文件名同名（pairKey），不做内容相似度判断；
+    - run_pairing 幂等，不覆盖人工改过 / 已确认的行；
+    - 缺副图 / 解析不出同名键 / 重名等阻断异常由 confirm_pairings 报错（让用户先修文件），
+      不会静默生成残缺版本。
+    """
+    from app.services.pairing_service import confirm_pairings, load_pairings, run_pairing
+
+    upload = _resolve_upload(db, design_package_id, upload_id)
+    # 没有配对记录才跑自动配对；已有（含人工改过的）幂等复用
+    _inputs, rows, _dtos, _summary = load_pairings(db, upload.id)
+    if not rows:
+        run_pairing(db, upload.id)
+    confirm_pairings(db, upload.id, actor=actor)
+
+
 def create_batch(
     db: Session,
     design_package_id: str,
@@ -165,7 +184,8 @@ def create_batch(
     upload_id: str | None = None,
 ) -> BatchCreateResult:
     """
-    确认整包配对并生成下一版（第一次 = V1）。整个函数在调用方的事务里，失败整体回滚。
+    自动按同名 pairKey 配对 + 自动确认后生成下一版（第一次 = V1）。
+    整个函数在调用方的事务里，失败整体回滚。
     """
     package = db.get(DesignPackage, design_package_id)
     if package is None:
@@ -173,6 +193,21 @@ def create_batch(
     if package.archived_at is not None:
         # 已删除（归档）的设计包不能再生成新版本
         raise ArchivedPackageError()
+
+    # 先做数量核对：数量不一致优先报 MATERIAL_COUNT_MISMATCH（在配对问题之前）。
+    upload = _resolve_upload(db, design_package_id, upload_id)
+    from app.services.pairing_service import gather_pairing_inputs
+
+    inputs = gather_pairing_inputs(db, upload.id)
+    count_check = build_count_check(len(inputs.positions), len(inputs.variants))
+    if count_check.blocked:
+        raise MaterialCountMismatchError(
+            f"主素材 {count_check.mainCount} 个、副图 {count_check.variantUploadCount} 张，"
+            f"数量不一致，不允许生成版本"
+        )
+
+    # 自动配对 + 自动确认（去掉人工配对步骤）；缺副图/解析不出等阻断异常在此报错
+    _auto_pair_and_confirm(db, design_package_id, upload.id, actor=actor)
 
     upload, dtos = validate_ready_for_batch(db, design_package_id, upload_id)
 

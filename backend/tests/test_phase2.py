@@ -376,14 +376,16 @@ def test_confirm_all_then_generate_v1(client, phase2_package, db_session):
     db_session.commit()
 
 
-def test_batch_requires_confirmed_pairings(client, phase2_package):
-    """没确认就建版 → 拒绝。"""
+def test_batch_auto_pairs_without_manual_confirm(client, phase2_package):
+    """去掉人工配对步骤：不点「确认配对」也能直接建版（后端自动按同名 pairKey 配对+确认）。"""
     ctx = phase2_package(3)
     response = client.post(
         f"/api/design-packages/{ctx['pkg']['id']}/batches", json={"actor": "小柯"}
     )
-    assert response.status_code == 409, response.text
-    assert response.json()["code"] == "PAIRING_INCOMPLETE"
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["versionNo"] == 1
+    assert len(body["variants"]) == 3
 
 
 def test_batch_blocked_when_count_mismatch(client, phase2_package):
