@@ -838,6 +838,14 @@ export default function MaterialCenterPage() {
               onDeletePackagePermanent={async (group) => {
                 try {
                   await deletePackagePermanentFromApi(group.pkg.id, '素材中心');
+                  // 物理删除后，上传页 sessionStorage 里若还存着这个包，会反复报「设计包不存在」——一并清掉
+                  try {
+                    if (sessionStorage.getItem('materialCenter.activePackageId') === group.pkg.id) {
+                      sessionStorage.removeItem('materialCenter.activePackageId');
+                    }
+                  } catch {
+                    /* 忽略 */
+                  }
                   setExpandedPackages((prev) => {
                     const next = new Set(prev);
                     next.delete(group.pkg.id);

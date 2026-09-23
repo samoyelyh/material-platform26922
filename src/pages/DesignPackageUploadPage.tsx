@@ -217,9 +217,15 @@ export default function DesignPackageUploadPage() {
     syncedPkgRef.current = activePkgId
     void refreshPackageFromApi(activePkgId).catch((error: unknown) => {
       syncedPkgRef.current = ''
-      // 这个设计包已经被删除（软删除 / 归档）：把本地当前包也清掉，
-      // 否则页面会一直停在一个后端已经不返回的包上。
-      if (error instanceof ApiError && error.code === 'DESIGN_PACKAGE_ARCHIVED') {
+      // 这个设计包已经被删除（软删除归档 / 永久删除 / 已不存在）：
+      // 把本地当前包也清掉，否则页面会一直停在一个后端已经不返回的包上，
+      // 后续上传/建版会反复报「设计包不存在」。
+      const isGone =
+        error instanceof ApiError &&
+        (error.code === 'DESIGN_PACKAGE_ARCHIVED' ||
+          error.code === 'DESIGN_PACKAGE_NOT_FOUND' ||
+          error.status === 404)
+      if (isGone) {
         try {
           sessionStorage.removeItem(ACTIVE_PKG_KEY)
         } catch {
@@ -228,7 +234,7 @@ export default function DesignPackageUploadPage() {
         setActivePkgId('')
         setStaged([])
         setSelected(null)
-        toast.error('该设计包已被删除（归档），已切换回「新建设计包」', { duration: 8000 })
+        toast.error('当前设计包已不存在，已切换回「新建设计包」', { duration: 8000 })
         return
       }
       toast.error(
