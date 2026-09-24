@@ -100,3 +100,52 @@ def test_different_main_and_variant_creates_new(
     variants = db_session.execute(select(MaterialVariant)).scalars().all()
     assert len(materials) == 2
     assert len(variants) == 2
+
+
+def test_contract_includes_reused_variants_from_other_batch(
+    client, create_package, create_upload, upload_file, png_bytes, db_session, auth_users, auth_tokens
+):
+    """回归：副素材被跨包复用后，契约必须返回该 Batch 的整套候选。
+
+    场景：包A(主A+副X) 建版 → 包B(同主同副) 建版（复用，variant.batch_id 仍是包A的 batch）
+          → 派发包B → 回填 Child ASIN → contract 查询必须返回 2 端的复用 variant。
+    （修复前：contract 只按 batch_id 查 → 复用场景返回空 variants=[]）
+    """
+    main_b = png_bytes((120, 30, 30))
+    variant_x = png_bytes((30, 120, 30))
+
+    # 包A 建版（_build_package 内部完成配对+建版）
+    pkgA, batchA = _build_package(client, create_package, create_upload, upload_file, "复用包A", main_b, variant_x)
+    assert batchA["code"] == "V1"
+
+    # 包B（完全相同内容）→ 建版时复用包A的 variant
+    pkgB, batchB = _build_package(client, create_package, create_upload, upload_file, "复用包B", main_b, variant_x)
+    assert batchB["reusedVariantCount"] == 1, "包B应复用包A的副素材"
+
+    db_session.rollback()
+    reused = db_session.execute(select(MaterialVariant)).scalars().all()
+    assert len(reused) == 1, "全库只应有 1 个副素材实体"
+    assert reused[0].batch_id != batchB["id"], "复用 variant 的 batch_id 应指向包A的 batch"
+
+    # 派发包B + 回填 Child ASIN
+    task = client.post(
+        f"/api/design-packages/{pkgB['id']}/distributions",
+        json={"operatorUserId": auth_users["operator"].id},
+        headers=auth_tokens["manager"],
+    ).json()
+    client.put(
+        f"/api/distributions/{task['id']}/asins",
+        json={"parentAsin": "B0REUSEP01", "children": ["B0REUSEC01"]},
+        headers=auth_tokens["operator"],
+    )
+
+    # 契约：必须返回该 Batch 的整套候选（含复用 variant），而不是空
+    c = client.get("/api/contract/materials-by-child-asin/B0REUSEC01")
+    assert c.status_code == 200, c.text
+    body = c.json()
+    assert body["batch"]["batchId"] == batchB["id"]
+    assert len(body["variants"]) == 1, f"复用场景契约候选不能为空，实际 {len(body['variants'])}"
+    v = body["variants"][0]
+    assert v["variantId"] == reused[0].id, "契约应返回被本 batch 复用引用的原 variant"
+    assert v["materialCode"].startswith("MAT-")
+    assert any(i["imageRole"] == "MATERIAL_SOURCE" for i in v["images"])

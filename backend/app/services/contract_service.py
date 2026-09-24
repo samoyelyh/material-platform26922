@@ -92,12 +92,40 @@ def material_facts_by_child_asin(db: Session, child_asin: str) -> ContractChildA
 def _variant_candidates(
     db: Session, batch: DerivativeBatch, package: DesignPackage
 ) -> list[ContractVariantDTO]:
-    variants = list(
+    """本 Batch 的整套 Variant 候选，与派发快照 / list_batch_variants 同口径：
+
+    - 本 Batch 创建的（MaterialVariant.batch_id == batch.id）
+    - 被本 Batch 通过配对复用引用的（MaterialPairing.variant_id 指向、
+      其 batch_id 是别的包的 —— 完全相同副素材跨包去重复用后的形态）。
+    不改契约 DTO；只修正候选集查询口径（修复复用场景下 contract 返回空的问题）。
+    """
+    from app.db.models import MaterialPairing
+
+    created = list(
         db.execute(
             select(MaterialVariant)
             .where(MaterialVariant.batch_id == batch.id, MaterialVariant.deleted.is_(False))
         ).scalars()
     )
+    reused: list[MaterialVariant] = []
+    if batch.created_from_upload_id:
+        reused = list(
+            db.execute(
+                select(MaterialVariant)
+                .join(MaterialPairing, MaterialPairing.variant_id == MaterialVariant.id)
+                .where(
+                    MaterialPairing.package_upload_id == batch.created_from_upload_id,
+                    MaterialVariant.batch_id != batch.id,
+                    MaterialVariant.deleted.is_(False),
+                )
+            ).scalars()
+        )
+    seen: set[str] = set()
+    variants: list[MaterialVariant] = []
+    for variant in [*created, *reused]:
+        if variant.id not in seen:
+            seen.add(variant.id)
+            variants.append(variant)
     if not variants:
         return []
 
