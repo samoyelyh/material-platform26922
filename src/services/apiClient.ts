@@ -105,6 +105,45 @@ const UNREACHABLE_HINT = [
 
 const CORS_HINT = `后端已能连通，但响应缺少 CORS 头（浏览器把结果拦截了）。请把当前页面来源加入后端 CORS 白名单。`
 
+// ---------------------------------------------------------------- 登录态（V1.1）
+//
+// 内部局域网系统第一版：token 存 localStorage。
+// XSS 风险说明：若页面被注入恶意脚本可读到 token；当前无富文本/第三方脚本，
+// 后续如需更强可换 HttpOnly Cookie（需要后端配套，属后续迭代）。
+
+const TOKEN_KEY = 'materialCenter.token'
+
+export const authSession = {
+  getToken(): string | null {
+    try {
+      return localStorage.getItem(TOKEN_KEY)
+    } catch {
+      return null
+    }
+  },
+  setToken(token: string) {
+    try {
+      localStorage.setItem(TOKEN_KEY, token)
+    } catch {
+      // 忽略
+    }
+  },
+  clear() {
+    try {
+      localStorage.removeItem(TOKEN_KEY)
+    } catch {
+      // 忽略
+    }
+  },
+  /** 注销登录并跳转 /login（不刷新页面） */
+  logout() {
+    authSession.clear()
+    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+      window.location.assign('/login')
+    }
+  },
+}
+
 async function parseError(response: Response): Promise<never> {
   let body: ApiErrorBody = {}
   try {
@@ -126,9 +165,14 @@ async function parseError(response: Response): Promise<never> {
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers)
+  const token = authSession.getToken()
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`)
+  }
   let response: Response
   try {
-    response = await fetch(`${API_BASE}${path}`, init)
+    response = await fetch(`${API_BASE}${path}`, { ...init, headers })
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error)
     throw new ApiError(
@@ -139,6 +183,10 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       'NETWORK_ERROR',
       UNREACHABLE_HINT,
     )
+  }
+  if (response.status === 401) {
+    // token 无效 / 过期 / 被禁用 → 清登录态并跳登录页
+    authSession.logout()
   }
   if (!response.ok) await parseError(response)
   if (response.status === 204) return undefined as T
@@ -613,6 +661,8 @@ export interface DistributionTaskDto {
   designerName: string
   operatorId: string
   operatorName: string
+  /** V1.1：指向真实 users.id（旧 operatorId/operatorName 保留兼容） */
+  operatorUserId?: string | null
   status: 'ACTIVE' | 'RECEIVED' | 'COMPLETED' | 'CANCELLED'
   assignedAt: string
   receivedAt?: string | null
@@ -850,6 +900,54 @@ export async function probeBackend(timeoutMs = 8000): Promise<BackendProbeResult
 
 // ---------------------------------------------------------------- API 方法
 
+// ---------------------------------------------------------------- V1.1 认证 / 用户 DTO
+
+export interface UserDto {
+  id: string
+  username: string
+  displayName: string
+  role: 'ADMIN' | 'DESIGN_MANAGER' | 'DESIGNER' | 'OPERATOR'
+  isActive: boolean
+  lastLoginAt?: string | null
+  createdAt: string
+}
+
+export interface LoginResponseDto {
+  token: string
+  user: UserDto
+}
+
+export interface OperatorOptionDto {
+  id: string
+  username: string
+  displayName: string
+}
+
+export const authApi = {
+  /** 账号密码登录 → JWT + 用户信息 */
+  login: (username: string, password: string) =>
+    request<LoginResponseDto>('/auth/login', jsonInit('POST', { username, password })),
+  /** 当前登录用户（恢复登录态） */
+  me: () => request<UserDto>('/auth/me'),
+  /** 登出（纯 JWT：前端删除 token） */
+  logout: () => request<{ ok: boolean }>('/auth/logout', { method: 'POST' }),
+}
+
+export const usersApi = {
+  /** 用户列表（ADMIN） */
+  listUsers: () => request<UserDto[]>('/users'),
+  /** 新增用户（ADMIN） */
+  createUser: (payload: { username: string; displayName: string; role: UserDto['role']; password: string }) =>
+    request<UserDto>('/users', jsonInit('POST', payload)),
+  /** 修改用户 姓名/角色/状态/重置密码（ADMIN） */
+  patchUser: (
+    userId: string,
+    payload: { displayName?: string; role?: UserDto['role']; isActive?: boolean; password?: string },
+  ) => request<UserDto>(`/users/${encodeURIComponent(userId)}`, jsonInit('PATCH', payload)),
+  /** 可派发运营选项（role=OPERATOR 且启用） */
+  listOperators: () => request<OperatorOptionDto[]>('/users/operators'),
+}
+
 export const materialApi = {
   health: () => request<HealthDto>('/health'),
 
@@ -1034,10 +1132,10 @@ export const materialApi = {
       `/design-packages/${encodeURIComponent(designPackageId)}/distributions`,
     ),
 
-  /** 派发当前最新 Batch 给运营 */
+  /** 派发当前最新 Batch 给真实运营（V1.1：指定 operatorUserId） */
   createDistribution: (
     designPackageId: string,
-    payload: { operatorId?: string; operatorName?: string; remark?: string },
+    payload: { operatorUserId: string; remark?: string },
   ) =>
     request<DistributionTaskDto>(
       `/design-packages/${encodeURIComponent(designPackageId)}/distributions`,
@@ -1048,10 +1146,16 @@ export const materialApi = {
   getDistribution: (taskId: string) =>
     request<DistributionTaskDto>(`/distributions/${encodeURIComponent(taskId)}`),
 
-  /** 全部派发任务（分发列表，可按状态筛选） */
+  /** 全部派发任务（分发列表，可按状态筛选；仅 ADMIN/DESIGN_MANAGER） */
   listAllDistributions: (status?: string) => {
     const search = status ? `?status=${encodeURIComponent(status)}` : ''
     return request<DistributionTaskDto[]>(`/distributions${search}`)
+  },
+
+  /** 我的任务（OPERATOR 只看自己；ADMIN/DESIGN_MANAGER 看全部） */
+  listMyDistributions: (status?: string) => {
+    const search = status ? `?status=${encodeURIComponent(status)}` : ''
+    return request<DistributionTaskDto[]>(`/distributions/my${search}`)
   },
 
   /** 运营接收素材 */

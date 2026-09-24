@@ -81,6 +81,13 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["uploads"])
 
+# 素材变更（上传文件 / 编辑上传记录）需登录 + 角色（ADMIN / DESIGN_MANAGER / DESIGNER）
+from app.core.auth import require_roles  # noqa: E402
+from app.core.security import ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER  # noqa: E402
+from app.db.models import User  # noqa: E402
+
+material_editor = require_roles(ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER)
+
 DESIGN_MIME_TYPES = {
     "application/vnd.adobe.photoshop",
     "image/vnd.adobe.photoshop",
@@ -172,6 +179,7 @@ async def upload_file(
         description="主素材 MAIN_PREVIEW / PSD / 副图 VARIANT / 其他 OTHER；不传则按文件名推断",
     ),
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> UploadFileResponse:
     upload, session = _load_upload_context(db, upload_id)
     actor = upload.uploader_name
@@ -485,6 +493,7 @@ def patch_upload_session(
     session_id: str,
     payload: UploadSessionPatchRequest,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> UploadSessionDTO:
     from app.core.errors import UploadSessionNotFound
 
@@ -530,6 +539,7 @@ def patch_upload(
     upload_id: str,
     payload: PackageUploadPatchRequest,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> PackageUploadDTO:
     """
     第7条：美工（uploader_name）与归属运营（upload_sessions.operator_name）都允许手工填写。

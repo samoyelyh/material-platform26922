@@ -35,7 +35,7 @@ def _count(db, model):
     return db.execute(select(model)).scalars().all()
 
 
-def test_permanent_delete_removes_own_data_keeps_shared_mat_asset(client, phase2_package, db_session):
+def test_permanent_delete_removes_own_data_keeps_shared_mat_asset(client, phase2_package, db_session, auth_users, auth_tokens):
     """单包永久删除：包自身数据全删；共享 MAT / Asset 保留。"""
     ctx = phase2_package(2)
     pkg_id = ctx["pkg"]["id"]
@@ -44,9 +44,14 @@ def test_permanent_delete_removes_own_data_keeps_shared_mat_asset(client, phase2
     # 派发 + ASIN
     task = client.post(
         f"/api/design-packages/{pkg_id}/distributions",
-        json={"operatorId": "zhang", "operatorName": "张三", "actor": "肖芸"},
+        json={"operatorUserId": auth_users["operator"].id},
+        headers=auth_tokens["manager"],
     ).json()
-    client.put(f"/api/distributions/{task['id']}/asins", json={"parentAsin": "B0PARENT01", "children": ["B0CHILD000"]})
+    client.put(
+        f"/api/distributions/{task['id']}/asins",
+        json={"parentAsin": "B0PARENT01", "children": ["B0CHILD000"]},
+        headers=auth_tokens["operator"],
+    )
 
     db_session.rollback()
     mat_count_before = len(_count(db_session, Material))

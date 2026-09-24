@@ -10,6 +10,10 @@ pillow==12.3.0
 blake3==1.0.9
 python-multipart==0.0.32
 
+# 登录 / 用户 / RBAC（V1.1）
+bcrypt==5.0.0
+PyJWT==2.14.0
+
 # 测试
 pytest==9.1.1
 httpx==0.28.1

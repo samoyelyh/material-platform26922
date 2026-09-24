@@ -40,6 +40,13 @@ router = APIRouter(tags=["pairings"])
 
 DEFAULT_ACTOR = "肖芸"
 
+# 素材变更（配对操作）需登录 + 角色（ADMIN / DESIGN_MANAGER / DESIGNER）
+from app.core.auth import require_roles  # noqa: E402
+from app.core.security import ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER  # noqa: E402
+from app.db.models import User  # noqa: E402
+
+material_editor = require_roles(ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER)
+
 
 def _actor(value: str | None) -> str:
     return (value or "").strip() or DEFAULT_ACTOR
@@ -54,6 +61,7 @@ def run_upload_pairing(
     upload_id: str,
     actor: str | None = None,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> PairingRunResponse:
     result = run_pairing(db, upload_id)
     dtos = build_pairing_dtos(db, result.inputs, result.rows)
@@ -119,6 +127,7 @@ def patch_pairing(
     pairing_id: str,
     payload: PairingPatchRequest,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> MaterialPairingDTO:
     dto, _summary = update_pairing(
         db,
@@ -142,6 +151,7 @@ def confirm_upload_pairings(
     upload_id: str,
     actor: str | None = None,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> PairingConfirmResponse:
     confirmed, dtos, summary, anomalies = confirm_pairings(db, upload_id, actor=_actor(actor))
     db.commit()

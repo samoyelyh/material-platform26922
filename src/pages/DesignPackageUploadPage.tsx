@@ -28,7 +28,7 @@ import {
   useWorkflowState,
   type LocalUploadFile,
 } from '@/store/workflowStore'
-import { ApiError, API_BASE, materialApi } from '@/services/apiClient'
+import { ApiError, API_BASE, materialApi, usersApi, type OperatorOptionDto } from '@/services/apiClient'
 import {
   checkBackendHealth,
   confirmPairingsApi,
@@ -41,12 +41,6 @@ import {
   type BackendHealthResult,
 } from '@/services/phase1UploadApi'
 import type { PairingView } from '@/types/material-workflow'
-
-const OPERATORS = [
-  { id: 'zhang', name: '张三' },
-  { id: 'li', name: '李四' },
-  { id: 'wang', name: '王敏' },
-]
 
 /** 设计美工（设计包长期属性）的默认值 */
 const DEFAULT_DESIGNER = '肖芸'
@@ -112,8 +106,25 @@ export default function DesignPackageUploadPage() {
   const [uploader, setUploader] = useState(() =>
     readStorage(UPLOADER_KEY, readStorage(DESIGNER_KEY, DEFAULT_DESIGNER)),
   )
-  /** 归属运营：自由文本（输入框 + 可选建议），不强制从固定列表里选 */
-  const [operator, setOperator] = useState(() => readStorage(OPERATOR_KEY))
+  /**
+   * V1.1 派发运营：从真实 users 加载（role=OPERATOR 且启用），不再写死列表。
+   * operatorUserId = 派发指定的真实运营账号 id；operatorName = 显示名。
+   */
+  const [operatorOptions, setOperatorOptions] = useState<OperatorOptionDto[]>([])
+  const [operatorUserId, setOperatorUserId] = useState('')
+  useEffect(() => {
+    if (!isApiMode()) return
+    void usersApi
+      .listOperators()
+      .then((rows) => {
+        setOperatorOptions(rows)
+        // 默认选中第一个运营（可直接派发）
+        if (rows.length > 0) setOperatorUserId((prev) => prev || rows[0].id)
+      })
+      .catch(() => setOperatorOptions([]))
+  }, [])
+  /** 选中运营的显示名（提交会话时用） */
+  const operatorDisplayName = operatorOptions.find((o) => o.id === operatorUserId)?.displayName ?? ''
   const [remark, setRemark] = useState('')
   const [staged, setStaged] = useState<StagedFile[]>([])
   // 第二十九条：当前设计包 id 落 sessionStorage，刷新后仍停留在同一上传会话，不会重复创建
@@ -380,7 +391,8 @@ export default function DesignPackageUploadPage() {
     const designCodeText = designCodeValue.trim()
     const designerText = (overview?.pkg.designerName || designer).trim()
     const uploaderText = (overview?.upload.uploaderName || uploader).trim()
-    const operatorText = (overview?.operatorName || operator).trim()
+    // V1.1：归属运营从真实 users 选择（operatorUserId）
+    const operatorText = (overview?.operatorName || operatorDisplayName).trim()
     // 已有设计包时允许只补传副图，所以「未选主素材」只在没有设计包时才算阻断
     if (!stagedMains.length && !stagedVariants.length) reasons.push('未选择主素材或副素材')
     else if (!stagedMains.length && !overview) reasons.push('未选择主素材')
@@ -404,7 +416,7 @@ export default function DesignPackageUploadPage() {
     const effectiveDesignCode = designCodeValue.trim()
     const effectiveDesignerName = (overview?.pkg.designerName || designer).trim()
     const effectiveUploaderName = (overview?.upload.uploaderName || uploader).trim()
-    const effectiveOperatorName = (overview?.operatorName || operator).trim()
+    const effectiveOperatorName = (overview?.operatorName || operatorDisplayName).trim()
 
     if (!effectivePackageName) return block('请填写设计包名称')
     // 设计编码必填：素材的「关联设计」按它聚合，空着就无法关联
@@ -416,7 +428,7 @@ export default function DesignPackageUploadPage() {
     const uploaderName = effectiveUploaderName
     if (!uploaderName) return block('请填写实际上传人')
     const operatorNameText = effectiveOperatorName
-    if (!operatorNameText) return block('请填写归属运营')
+    if (!operatorNameText) return block('请选择归属运营')
     if (!stagedMains.length && !stagedVariants.length) return block('请上传主素材或副素材')
     // 已有设计包时允许「只补传新一版副图」：主素材与位置都沿用原来的，
     // 只是这次上传带来新的副图（V2/V3…）。没有任何设计包时主素材必传。
@@ -433,8 +445,8 @@ export default function DesignPackageUploadPage() {
       .toISOString()
       .slice(0, 10)
       .replace(/-/g, '')}.zip`
-    // 归属运营是自由文本：能对上系统用户就带 userId，对不上就只存名字（后端 operator_id 为空）
-    const knownOperator = OPERATORS.find((o) => o.name === operatorNameText || o.id === operatorNameText)
+    // V1.1：归属运营来自真实 users（operatorUserId → users.id），不再用写死列表反查
+    const knownOperator = operatorOptions.find((o) => o.id === operatorUserId)
 
     try {
       if (isApiMode()) {
@@ -446,7 +458,7 @@ export default function DesignPackageUploadPage() {
           packageName: effectivePackageName,
           designCode: effectiveDesignCode,
           originalPackageName,
-          operatorId: knownOperator?.id,
+          operatorId: knownOperator?.username,
           operatorName: operatorNameText,
           designerName,
           uploaderName,
@@ -667,7 +679,8 @@ export default function DesignPackageUploadPage() {
 
   const handleSubmit = async () => {
     if (!activePkgId) return
-    const result = await submitAndDispatch(activePkgId, actor)
+    // V1.1：派发必须指定真实运营账号（operatorUserId → users.id）
+    const result = await submitAndDispatch(activePkgId, actor, operatorUserId)
     if (result.error) {
       toast.error(result.error)
       return
@@ -705,30 +718,32 @@ export default function DesignPackageUploadPage() {
   /** 暂存区 + 必填项还没凑齐时，把这些原因显示在按钮旁边 */
   const stagedBlockers = staged.length > 0 ? collectBlockers() : []
 
-  /** 归属运营：自由文本输入，失焦时持久化（没有真实 userId 也允许保存） */
-  const handleOperatorChange = (value: string) => {
-    setOperator(value)
-    writeStorage(OPERATOR_KEY, value.trim())
-  }
-
-  const persistOperator = async () => {
-    const name = operator.trim()
-    writeStorage(OPERATOR_KEY, name)
-    if (!name || !overview) return
-    const known = OPERATORS.find((o) => o.name === name || o.id === name)
-    try {
-      if (isApiMode()) {
-        await materialApi.patchUploadSession(overview.session.id, {
-          operatorId: known?.id,
-          operatorName: name,
-        })
-        await refreshPackageFromApi(overview.pkg.id)
-      } else {
-        setSessionOperator(overview.session.id, known?.id ?? name, name)
+  /**
+   * V1.1 归属运营：从真实 users 选择（operatorUserId），不再自由文本。
+   * 选中后立即持久化到上传会话（operatorId=username / operatorName=displayName）。
+   */
+  const handleOperatorChange = (userId: string) => {
+    setOperatorUserId(userId)
+    const chosen = operatorOptions.find((o) => o.id === userId)
+    writeStorage(OPERATOR_KEY, chosen?.displayName ?? '')
+    if (!overview) return
+    const name = chosen?.displayName ?? ''
+    if (!name) return
+    void (async () => {
+      try {
+        if (isApiMode()) {
+          await materialApi.patchUploadSession(overview.session.id, {
+            operatorId: chosen?.username,
+            operatorName: name,
+          })
+          await refreshPackageFromApi(overview.pkg.id)
+        } else {
+          setSessionOperator(overview.session.id, chosen?.username ?? name, name)
+        }
+      } catch (error) {
+        toast.error(error instanceof ApiError ? error.message : '归属运营保存失败')
       }
-    } catch (error) {
-      toast.error(error instanceof ApiError ? error.message : '归属运营保存失败')
-    }
+    })()
   }
 
   /** 设计美工：自由文本输入，失焦时写入 design_packages.designer_name */
@@ -949,17 +964,17 @@ export default function DesignPackageUploadPage() {
             </label>
             <label className="space-y-1.5 text-xs">
               <span className="font-medium text-gray-600">归属运营 <b className="text-red-500">*</b></span>
-              {/* 自由文本 + 建议列表：既能选既有运营，也能直接填新同事名字（不要求有 userId） */}
-              <Input
-                list="operator-suggestions"
-                value={overview?.operatorName ?? operator}
+              {/* V1.1：从真实 users 选择（role=OPERATOR 且启用），不再自由文本/写死列表 */}
+              <select
+                value={operatorUserId}
                 onChange={(event) => handleOperatorChange(event.target.value)}
-                onBlur={() => void persistOperator()}
-                placeholder="可直接手填，例如 王姐"
-              />
-              <datalist id="operator-suggestions">
-                {OPERATORS.map((item) => <option key={item.id} value={item.name} />)}
-              </datalist>
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs"
+              >
+                {operatorOptions.length === 0 && <option value="">（暂无可派发运营）</option>}
+                {operatorOptions.map((item) => (
+                  <option key={item.id} value={item.id}>{item.displayName}</option>
+                ))}
+              </select>
             </label>
             <label className="space-y-1.5 text-xs md:col-span-2">
               <span className="font-medium text-gray-600">标签</span>
@@ -1522,17 +1537,18 @@ export default function DesignPackageUploadPage() {
               <CardContent className="space-y-3">
                 <div className="flex flex-wrap items-center gap-4 text-sm">
                   <div>
-                    将派发给 <span className="font-medium">{overview.operatorName ?? '未指定'}</span>，
+                    将派发给 <span className="font-medium">{operatorDisplayName || overview.operatorName || '未指定'}</span>，
                     版本 <span className="font-medium">{currentBatch?.code ?? '尚未生成'}</span>，
                     共 <span className="font-medium">{overview.countCheck.variantUploadCount}</span> 张副图
                   </div>
+                  {/* V1.1：从真实 users 选择运营（role=OPERATOR 且启用），不再写死列表 */}
                   <Select
-                    value={overview.operatorId ?? ''}
+                    value={operatorUserId}
                     onValueChange={handleOperatorChange}
                   >
-                    <SelectTrigger className="h-8 w-[140px] text-xs"><SelectValue placeholder="切换运营" /></SelectTrigger>
+                    <SelectTrigger className="h-8 w-[140px] text-xs"><SelectValue placeholder="选择运营" /></SelectTrigger>
                     <SelectContent>
-                      {OPERATORS.map((item) => <SelectItem key={item.id} value={item.id}>{item.name}</SelectItem>)}
+                      {operatorOptions.map((item) => <SelectItem key={item.id} value={item.id}>{item.displayName}</SelectItem>)}
                     </SelectContent>
                   </Select>
                   <span className="text-xs text-gray-400">后续可新增派发给其他运营，复用同一套底层副素材，不复制图片</span>
@@ -1549,9 +1565,8 @@ export default function DesignPackageUploadPage() {
                 <div className="flex items-center gap-2">
                   <Button
                     className="bg-[#3d3192] hover:bg-[#32277a]"
-                    // 归属运营允许只有名字（无 userId），所以不能用 operatorId 作为禁用条件
-                    // 派发运营已接入真实后端（POST /design-packages/{id}/distributions），真实模式下同样可派发
-                    disabled={overview.submitted || !overview.operatorName}
+                    // V1.1：必须选中真实运营账号（operatorUserId）才能派发
+                    disabled={overview.submitted || !operatorUserId || !currentBatch}
                     onClick={handleSubmit}
                   >
                     提交并派发
@@ -1582,7 +1597,7 @@ export default function DesignPackageUploadPage() {
             <div className="grid grid-cols-2 gap-2 rounded-md bg-gray-50 px-3 py-2 text-xs">
               <div>设计包：<b>{overview?.pkg.name ?? packageName.trim()}</b></div>
               <div>负责人：<b>{overview?.pkg.responsibleName ?? designer.trim()}</b></div>
-              <div>归属运营：<b>{overview?.operatorName ?? operator.trim()}</b></div>
+              <div>归属运营：<b>{overview?.operatorName ?? operatorDisplayName}</b></div>
               <div>设计编码：<b>{overview?.pkg.designCode ?? designCodeValue.trim()}</b></div>
             </div>
             <div className="flex flex-wrap gap-1.5">

@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import (
+    auth,
     batches,
     contract,
     design_packages,
@@ -21,6 +22,7 @@ from app.api import (
     materials,
     pairings,
     uploads,
+    users,
 )
 from app.core.config import settings
 from app.core.errors import AppError
@@ -83,6 +85,8 @@ async def unhandled_error_handler(_: Request, exc: Exception) -> JSONResponse:
 
 # ---------------------------------------------------------------- 路由
 
+app.include_router(auth.router, prefix=settings.api_prefix)
+app.include_router(users.router, prefix=settings.api_prefix)
 app.include_router(design_packages.router, prefix=settings.api_prefix)
 app.include_router(uploads.router, prefix=settings.api_prefix)
 app.include_router(materials.router, prefix=settings.api_prefix)

@@ -108,6 +108,52 @@ def client():
         yield test_client
 
 
+@pytest.fixture(autouse=True)
+def _default_editor_auth(client, clean_tables):
+    """为每个测试注入一个默认「美工组长」登录态（V1.1 素材变更端点需登录 + 角色）。
+
+    现有 134 个测试在素材变更端点未显式带 token；注入默认 DESIGN_MANAGER 登录态后
+    这些测试无需逐个修改即可继续通过。测试显式传 Authorization 时会覆盖默认值。
+
+    注意：必须用**独立 session** 建默认用户，不能用 db_session —— 否则会提前开启
+    db_session 的事务，MySQL REPEATABLE READ 会让断言读到提交默认用户时的旧快照。
+    """
+    from app.core.security import create_access_token
+    from app.db.models import User
+    from app.db.session import SessionLocal
+    from app.services.repository import new_id
+
+    user = User(
+        id=new_id("user"),
+        username="_default_editor",
+        password_hash=_cached_password_hash(),
+        display_name="默认美工组长",
+        role="DESIGN_MANAGER",
+        is_active=True,
+    )
+    with SessionLocal() as session:
+        session.add(user)
+        session.flush()  # 先落库拿到 id
+        uid, urole = user.id, user.role  # 在 session 关闭前取出，避免 detached 访问
+        session.commit()
+    client.headers["Authorization"] = f"Bearer {create_access_token(uid, urole)}"
+    yield
+    client.headers.pop("Authorization", None)
+
+
+_PW_HASH_CACHE: str | None = None
+
+
+def _cached_password_hash() -> str:
+    """bcrypt 哈希只算一次（bcrypt 慢，避免每个测试重复哈希拖慢整个测试套件）。"""
+    global _PW_HASH_CACHE
+    if _PW_HASH_CACHE is None:
+        from app.core.security import hash_password
+
+        _PW_HASH_CACHE = hash_password("pass123")
+    return _PW_HASH_CACHE
+
+
 # ---------------------------------------------------------------- 数据清理
 
 
@@ -123,6 +169,7 @@ def clean_tables():
         conn.execute(text("SET FOREIGN_KEY_CHECKS=0"))
         for table in [
             "activity_logs",
+            "users",
             "distribution_child_asins",
             "distribution_parent_asins",
             "distribution_task_items",
@@ -404,3 +451,57 @@ def phase2_package(client, create_package, create_upload, upload_file):
         }
 
     return _build
+
+
+# ---------------------------------------------------------------- V1.1：认证用户 / token（RBAC 测试用）
+
+
+@pytest.fixture()
+def auth_users(db_session):
+    """每个测试创建 管理员 + 美工组长 + 美工 + 运营1 + 运营2，返回 dict（含 user 对象）。"""
+    from app.db.models import User
+    from app.services.repository import new_id
+
+    def mk(username, role, display):
+        return User(
+            id=new_id("user"),
+            username=username,
+            password_hash=_cached_password_hash(),
+            display_name=display,
+            role=role,
+            is_active=True,
+        )
+
+    users = {
+        "admin": mk("admin", "ADMIN", "管理员"),
+        "manager": mk("manager", "DESIGN_MANAGER", "美工组长"),
+        "designer": mk("designer", "DESIGNER", "美工"),
+        "operator": mk("operator", "OPERATOR", "运营一"),
+        "operator2": mk("operator2", "OPERATOR", "运营二"),
+    }
+    db_session.add_all(list(users.values()))
+    db_session.commit()
+    return users
+
+
+@pytest.fixture()
+def auth_tokens(client, auth_users):
+    """按角色登录，返回 {role: "Bearer <token>"} 形式的 headers 字典。"""
+    def headers(username):
+        r = client.post("/api/auth/login", json={"username": username, "password": "pass123"})
+        assert r.status_code == 200, r.text
+        return {"Authorization": f"Bearer {r.json()['token']}"}
+
+    return {name: headers(user.username) for name, user in auth_users.items()}
+
+
+def dispatch_as(client, pkg_id: str, manager_headers: dict, operator_user) -> dict:
+    """以管理角色给 operator_user 派发（V1.1 真实身份）。返回 task json。"""
+    response = client.post(
+        f"/api/design-packages/{pkg_id}/distributions",
+        json={"operatorUserId": operator_user.id},
+        headers=manager_headers,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()
+

@@ -12,6 +12,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
+from app.core.auth import require_roles
+from app.core.security import ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER
+from app.db.models import User
 from app.db.session import get_db
 from app.schemas.dto import BatchCreateRequest, DerivativeBatchDTO
 from app.services.batch_service import (
@@ -25,6 +28,9 @@ router = APIRouter(tags=["batches"])
 
 DEFAULT_ACTOR = "肖芸"
 
+# 素材变更（上传 / 建版）需登录 + 角色（ADMIN / DESIGN_MANAGER / DESIGNER）
+material_editor = require_roles(ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER)
+
 
 @router.post(
     "/design-packages/{design_package_id}/batches",
@@ -35,6 +41,7 @@ def create_derivative_batch(
     design_package_id: str,
     payload: BatchCreateRequest,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> DerivativeBatchDTO:
     actor = (payload.actor or "").strip() or DEFAULT_ACTOR
     try:

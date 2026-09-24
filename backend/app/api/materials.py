@@ -35,6 +35,7 @@ from app.db.models import (
     MaterialVariant,
     PackageUpload,
     UploadSession,
+    User,
 )
 from app.db.session import get_db
 from app.schemas.dto import (
@@ -63,6 +64,12 @@ from app.services.repository import (
 from app.services.storage import get_storage
 
 router = APIRouter(tags=["materials"])
+
+# 素材变更（提交主素材 / 标签）需登录 + 角色（ADMIN / DESIGN_MANAGER / DESIGNER）
+from app.core.auth import require_roles  # noqa: E402
+from app.core.security import ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER  # noqa: E402
+
+material_editor = require_roles(ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER)
 
 
 @dataclass
@@ -148,6 +155,7 @@ def submit_upload_materials(
     upload_id: str,
     payload: SubmitMaterialsRequest,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> SubmitMaterialsResponse:
     upload = db.get(PackageUpload, upload_id)
     if upload is None:
@@ -495,6 +503,7 @@ def patch_material_tags(
     material_code: str,
     payload: TagPatchRequest,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> MaterialDTO:
     from app.services.tags import get_material_or_404, normalize_tags, set_tags
 
@@ -548,6 +557,7 @@ def patch_variant_tags(
     variant_id: str,
     payload: TagPatchRequest,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> dict:
     from app.services.tags import get_variant_detail, get_variant_or_404, normalize_tags, set_tags
 
@@ -589,7 +599,7 @@ def get_variant_history(variant_id: str, db: Session = Depends(get_db)) -> list[
 
 
 @router.post("/tags/batch", summary="素材中心多选批量调整标签（add / remove / replace）")
-def batch_tags(payload: TagBatchRequest, db: Session = Depends(get_db)) -> dict:
+def batch_tags(payload: TagBatchRequest, db: Session = Depends(get_db), _: User = Depends(material_editor)) -> dict:
     from app.services.tags import normalize_tags, set_tags
 
     clean_tags = normalize_tags(payload.tags)

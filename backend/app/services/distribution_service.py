@@ -33,6 +33,7 @@ from app.db.models import (
     DistributionTaskItem,
     MaterialPairing,
     MaterialVariant,
+    User,
     VariantRevision,
 )
 from app.schemas.dto import (
@@ -64,15 +65,20 @@ def dispatch_task(
     db: Session,
     design_package_id: str,
     *,
-    operator_id: str,
-    operator_name: str,
+    operator_user: User,
     actor: str,
     remark: str | None = None,
 ) -> DistributionTask:
     """
-    把一个设计包的「当前最新 Batch」及其整套副素材派发给运营。
+    把一个设计包的「当前最新 Batch」及其整套副素材派发给真实运营用户。
+    operator_user_id / operator_id(username) / operator_name(display_name) 全部来自该用户。
     同一 (batch, operator) 不允许存在两个进行中（ACTIVE/RECEIVED）的任务。
     """
+    from app.core.security import ROLE_OPERATOR
+
+    if operator_user.role != ROLE_OPERATOR or not operator_user.is_active:
+        raise ValidationError("只能派发给启用状态的运营账号（OPERATOR）")
+
     package = db.get(DesignPackage, design_package_id)
     if package is None:
         raise DesignPackageNotFound()
@@ -88,10 +94,8 @@ def dispatch_task(
     if batch is None:
         raise BatchNotFound("该设计包还没有上架版本，无法派发")
 
-    operator_id = (operator_id or "").strip()
-    operator_name = (operator_name or "").strip()
-    if not operator_id and not operator_name:
-        raise ValidationError("派发必须指定归属运营（operatorId 或 operatorName 至少一项）")
+    operator_id = operator_user.username
+    operator_name = operator_user.display_name
 
     active = (
         db.execute(
@@ -117,6 +121,7 @@ def dispatch_task(
         designer_name=package.designer_name,
         operator_id=operator_id,
         operator_name=operator_name,
+        operator_user_id=operator_user.id,
         status="ACTIVE",
         assigned_at=utcnow(),
         remark=remark,
@@ -368,6 +373,7 @@ def to_task_dto(db: Session, task: DistributionTask) -> DistributionTaskDTO:
         designerName=task.designer_name,
         operatorId=task.operator_id,
         operatorName=task.operator_name,
+        operatorUserId=task.operator_user_id,
         status=task.status,
         assignedAt=task.assigned_at,
         receivedAt=task.received_at,
@@ -385,6 +391,17 @@ def to_task_dto(db: Session, task: DistributionTask) -> DistributionTaskDTO:
 def list_all_tasks(db: Session, status: str | None = None) -> list[DistributionTask]:
     """全部派发任务（分发任务列表用），可按状态过滤。"""
     stmt = select(DistributionTask)
+    if status:
+        stmt = stmt.where(DistributionTask.status == status)
+    stmt = stmt.order_by(DistributionTask.assigned_at.desc())
+    return list(db.execute(stmt).scalars())
+
+
+def list_my_tasks(db: Session, operator_user_id: str, status: str | None = None) -> list[DistributionTask]:
+    """「我的任务」：只返回派给当前运营用户的任务（后端过滤，OPERATOR 只能看自己）。"""
+    stmt = select(DistributionTask).where(
+        DistributionTask.operator_user_id == operator_user_id
+    )
     if status:
         stmt = stmt.where(DistributionTask.status == status)
     stmt = stmt.order_by(DistributionTask.assigned_at.desc())
@@ -470,6 +487,7 @@ __all__ = [
     "dispatch_task",
     "get_task",
     "list_all_tasks",
+    "list_my_tasks",
     "list_tasks",
     "receive_task",
     "to_task_dto",

@@ -897,6 +897,8 @@ class DistributionTaskDTO(BaseModel):
     designerName: str
     operatorId: str
     operatorName: str
+    # V1.1 身份化：指向真实 users.id（旧 operatorId/operatorName 保留兼容）
+    operatorUserId: str | None = None
     status: str
     assignedAt: datetime
     receivedAt: datetime | None = None
@@ -1018,6 +1020,65 @@ class ContractChildAsinResponseDTO(BaseModel):
     categoryCode: str
     batch: ContractBatchDTO
     variants: list[ContractVariantDTO] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------- 用户 / 登录 / RBAC（V1.1）
+
+
+class UserDTO(BaseModel):
+    """用户公开信息（绝不包含 password_hash）。"""
+
+    id: str
+    username: str
+    displayName: str
+    role: str
+    isActive: bool
+    lastLoginAt: datetime | None = None
+    createdAt: datetime
+
+    @classmethod
+    def from_entity(cls, user) -> "UserDTO":
+        return cls(
+            id=user.id,
+            username=user.username,
+            displayName=user.display_name,
+            role=user.role,
+            isActive=user.is_active,
+            lastLoginAt=user.last_login_at,
+            createdAt=user.created_at,
+        )
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class LoginResponse(BaseModel):
+    token: str
+    user: UserDTO
+
+
+class OperatorOptionDTO(BaseModel):
+    """派发时可选运营（role=OPERATOR 且启用）。"""
+
+    id: str
+    username: str
+    displayName: str
+
+
+class UserCreateRequest(BaseModel):
+    username: str = Field(min_length=1, max_length=64)
+    displayName: str = Field(min_length=1, max_length=128)
+    role: Literal["ADMIN", "DESIGN_MANAGER", "DESIGNER", "OPERATOR"]
+    password: str = Field(min_length=6, max_length=128)
+
+
+class UserPatchRequest(BaseModel):
+    displayName: str | None = Field(default=None, min_length=1, max_length=128)
+    role: Literal["ADMIN", "DESIGN_MANAGER", "DESIGNER", "OPERATOR"] | None = None
+    isActive: bool | None = None
+    password: str | None = Field(default=None, min_length=6, max_length=128)
 
 
 # ---------------------------------------------------------------- 错误

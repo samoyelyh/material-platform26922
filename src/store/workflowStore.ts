@@ -1398,6 +1398,7 @@ export async function loadDistributionTaskFromApi(taskId: string) {
 export async function submitAndDispatch(
   pkgId: string,
   actor: string,
+  operatorUserId?: string,
 ): Promise<{ error?: string; taskId?: string }> {
   const state = getWorkflowState()
   const pkg = state.packages[pkgId]
@@ -1406,27 +1407,17 @@ export async function submitAndDispatch(
   const session = Object.values(state.sessions)
     .filter((s) => s.designPackageId === pkgId)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0]
-  const pairings = state.pairings[pkgId] ?? []
   const positions = (state.positions[pkgId] ?? []).filter((p) => p.materialId)
-  const variants = state.variants[pkgId] ?? []
-
-  // 第十三条：数量不一致禁止直接提交
-  const countCheck = checkMaterialCount(positions.length, variants.filter((v) => !v.deleted).length)
-  if (countCheck.blocked) return { error: countCheck.messages.join(' ') }
-
-  const operatorId = operatorsOfPackage(pkgId)[0]?.operatorId ?? session?.operatorId
-  const operatorName = operatorsOfPackage(pkgId)[0]?.operatorName ?? session?.operatorName
-  if (!operatorId && !operatorName) return { error: '首次上传必须选择归属运营后才能派发。' }
 
   const batch = currentBatchOf(pkgId)
   if (!batch) return { error: '缺少上架版本' }
 
   if (API_ENABLED) {
-    // 真实后端：派发由后端落库（distribution_tasks + items 快照），前端只做结果 hydrate
+    // V1.1：派发必须指定真实运营用户（operatorUserId → users.id）
+    if (!operatorUserId) return { error: '请先选择要派发的运营账号。' }
     try {
       const dto = await materialApi.createDistribution(pkgId, {
-        operatorId: operatorId || undefined,
-        operatorName: operatorName || undefined,
+        operatorUserId,
         remark: pkg.remark ?? undefined,
       })
       upsertTask(toDistributionTaskEntity(dto))
@@ -1443,6 +1434,15 @@ export async function submitAndDispatch(
   }
 
   // ---- Mock（开发隔离）：仅 VITE_MATERIAL_API=0 时使用，绝不作为真实业务数据源 ----
+  const pairings = state.pairings[pkgId] ?? []
+  const variants = state.variants[pkgId] ?? []
+  const countCheck = checkMaterialCount(positions.length, variants.filter((v) => !v.deleted).length)
+  if (countCheck.blocked) return { error: countCheck.messages.join(' ') }
+
+  const operatorId = operatorsOfPackage(pkgId)[0]?.operatorId ?? session?.operatorId
+  const operatorName = operatorsOfPackage(pkgId)[0]?.operatorName ?? session?.operatorName
+  if (!operatorId && !operatorName) return { error: '首次上传必须选择归属运营后才能派发。' }
+
   const missing = pairings.filter((p) => p.status === 'UNPAIRED')
   if (missing.length) {
     return {
@@ -1485,10 +1485,11 @@ export async function submitAndDispatch(
 /**
  * 第十五条：新增派发给其他运营，复用同一套底层副素材。
  * 第九条：同一 Batch + 同一运营 不允许存在两个进行中的任务。
+ * V1.1：operatorUserId = 真实运营账号 id（users.id）。
  */
 export async function addDistribution(
   pkgId: string,
-  operatorId: string,
+  operatorUserId: string,
   operatorName: string,
   actor: string,
 ): Promise<{ error?: string; taskId?: string }> {
@@ -1500,10 +1501,10 @@ export async function addDistribution(
 
   if (API_ENABLED) {
     // 真实后端：复用派发接口（后端做同一 (batch, operator) 进行中任务查重），不写内存
+    if (!operatorUserId) return { error: '请先选择要派发的运营账号。' }
     try {
       const dto = await materialApi.createDistribution(pkgId, {
-        operatorId: operatorId || undefined,
-        operatorName: operatorName || undefined,
+        operatorUserId,
         remark: pkg.remark ?? undefined,
       })
       upsertTask(toDistributionTaskEntity(dto))
@@ -1514,6 +1515,7 @@ export async function addDistribution(
     }
   }
 
+  const operatorId = operatorUserId
   const duplicate = findActiveDistribution(Object.values(state.tasks), batch.id, operatorId)
   if (duplicate) return { error: `该版本已经派发给${operatorName}。`, taskId: duplicate.id }
 

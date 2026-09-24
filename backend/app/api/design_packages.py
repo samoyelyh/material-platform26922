@@ -10,12 +10,14 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app.core.auth import require_roles
 from app.core.errors import (
     ArchivedPackageError,
     ConflictError,
     DesignPackageNotFound,
     ValidationError,
 )
+from app.core.security import ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER
 from app.db.models import (
     ActivityLog,
     DerivativeBatch,
@@ -26,6 +28,7 @@ from app.db.models import (
     Material,
     MaterialPairing,
     MaterialVariant,
+    User,
 )
 from app.db.session import get_db
 from app.schemas.dto import (
@@ -50,6 +53,9 @@ from app.services.repository import (
 
 router = APIRouter(tags=["design-packages"])
 
+# 素材变更（创建/编辑/删除设计包）需登录 + 角色（ADMIN / DESIGN_MANAGER / DESIGNER）
+material_editor = require_roles(ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER)
+
 DEFAULT_ACTOR = "肖芸"
 DEFAULT_UPLOADER_ID = "u-design-001"
 
@@ -61,6 +67,7 @@ DEFAULT_UPLOADER_ID = "u-design-001"
 def create_design_package(
     payload: DesignPackageCreateRequest,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> DesignPackageDTO:
     actor = payload.createdBy or DEFAULT_ACTOR
     name = payload.name.strip()
@@ -133,6 +140,7 @@ def patch_design_package(
     design_package_id: str,
     payload: DesignPackagePatchRequest,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> DesignPackageDTO:
     pkg = db.get(DesignPackage, design_package_id)
     if pkg is None:
@@ -272,6 +280,7 @@ def delete_design_package(
     design_package_id: str,
     actor: str | None = Query(default=None),
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> DesignPackageDTO:
     pkg = db.get(DesignPackage, design_package_id)
     if pkg is None:
@@ -307,6 +316,7 @@ def restore_design_package(
     design_package_id: str,
     actor: str | None = Query(default=None),
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> DesignPackageDTO:
     pkg = db.get(DesignPackage, design_package_id)
     if pkg is None:
@@ -352,6 +362,7 @@ def delete_design_package_permanent(
     design_package_id: str,
     actor: str | None = Query(default=None),
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> dict:
     pkg = db.get(DesignPackage, design_package_id)
     if pkg is None:
@@ -463,6 +474,7 @@ def create_package_upload(
     payload: CreateUploadRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> CreateUploadResponse:
     pkg = db.get(DesignPackage, design_package_id)
     if pkg is None:

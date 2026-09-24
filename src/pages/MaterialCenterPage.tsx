@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { PackageCheck, PackagePlus, X } from 'lucide-react';
+import { PackageCheck, PackagePlus, UserCog, LogOut, X } from 'lucide-react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -27,6 +27,7 @@ import {
   reloadAllPackagesFromApi,
   useWorkflowState,
 } from '@/store/workflowStore';
+import { canDispatch, canManageUsers, setLoggedOut, useAuth } from '@/store/authStore';
 import { API_ENABLED, materialApi, resolveMediaUrl, type ImageSearchResultDto } from '@/services/apiClient';
 import type { Material } from '@/types/material';
 
@@ -46,6 +47,8 @@ export default function MaterialCenterPage() {
   const navigate = useNavigate();
   // 订阅工作流 store：上传/补充素材后首页与抽屉立即刷新
   useWorkflowState();
+  // 当前登录用户（角色控制入口显示）
+  const { user: authUser } = useAuth();
 
   const [keyword, setKeyword] = useState('');
   const [catSel, setCatSel] = useState<CategorySelection>({ category: '', subCategory: '' });
@@ -543,8 +546,29 @@ export default function MaterialCenterPage() {
                 : '全部素材'}
         </span>
         <div className="ml-auto flex items-center gap-2">
-          <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" onClick={() => navigate('/materials/distributions')}><PackageCheck className="h-3.5 w-3.5" />运营派发</Button>
+          {canDispatch(authUser) && (
+            <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" onClick={() => navigate('/materials/distributions')}><PackageCheck className="h-3.5 w-3.5" />运营派发</Button>
+          )}
+          {canManageUsers(authUser) && (
+            <Button size="sm" variant="outline" className="h-7 px-2.5 text-xs" onClick={() => navigate('/admin/users')}><UserCog className="h-3.5 w-3.5" />用户管理</Button>
+          )}
           <Button size="sm" className="h-7 bg-[#3d3192] px-2.5 text-xs hover:bg-[#32277a]" onClick={() => navigate('/materials/upload')}><PackagePlus className="h-3.5 w-3.5" />上传设计包</Button>
+          {authUser && (
+            <>
+              <span className="text-gray-500">{authUser.displayName}</span>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2.5 text-xs"
+                onClick={() => {
+                  setLoggedOut();
+                  navigate('/login', { replace: true });
+                }}
+              >
+                <LogOut className="h-3.5 w-3.5" />退出
+              </Button>
+            </>
+          )}
         </div>
       </header>
 

@@ -779,6 +779,10 @@ class DistributionTask(Base):
 
     operator_id: Mapped[str] = mapped_column(VARCHAR(64), nullable=False)
     operator_name: Mapped[str] = mapped_column(VARCHAR(128), nullable=False)
+    # V1.1 身份化：指向真实 users.id（旧 operator_id/operator_name 字符串保留兼容期）
+    operator_user_id: Mapped[str | None] = mapped_column(
+        VARCHAR(64), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
 
     status: Mapped[str] = mapped_column(VARCHAR(16), nullable=False, default="ACTIVE")
 
@@ -900,4 +904,40 @@ class DistributionChildAsin(Base):
         ),
         Index("ix_distribution_child_asin", "child_asin"),
         {"comment": "派发任务 Child ASIN（订单中心契约检索入口）"},
+    )
+
+
+# ---------------------------------------------------------------- 用户（V1.1 登录 / RBAC）
+
+
+class User(Base):
+    """内部账号（登录 + 角色权限）。
+
+    密码只存 bcrypt 哈希，绝不存明文；username 唯一；is_active=false 后不能登录。
+    role ∈ ADMIN / DESIGN_MANAGER / DESIGNER / OPERATOR。
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[str] = mapped_column(VARCHAR(64), primary_key=True)
+    username: Mapped[str] = mapped_column(VARCHAR(64), nullable=False)
+    password_hash: Mapped[str] = mapped_column(VARCHAR(255), nullable=False)
+    display_name: Mapped[str] = mapped_column(VARCHAR(128), nullable=False)
+    role: Mapped[str] = mapped_column(VARCHAR(32), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    created_at: Mapped[datetime] = _ts()
+    updated_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, server_default=func.now(6), onupdate=func.now(6)
+    )
+    last_login_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("username", name="uq_users_username"),
+        CheckConstraint(
+            "role IN ('ADMIN','DESIGN_MANAGER','DESIGNER','OPERATOR')",
+            name="ck_users_role",
+        ),
+        Index("ix_users_role_active", "role", "is_active"),
+        {"comment": "内部用户账号（登录 + RBAC）"},
     )

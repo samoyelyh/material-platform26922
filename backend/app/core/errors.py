@@ -22,6 +22,21 @@ class AppError(HTTPException):
         super().__init__(status_code=self.http_status, detail=payload)
 
 
+# ---------------------------------------------------------------- 401 / 403
+
+
+class UnauthorizedError(AppError):
+    code = "UNAUTHORIZED"
+    http_status = status.HTTP_401_UNAUTHORIZED
+    default_message = "未登录或登录已失效"
+
+
+class ForbiddenError(AppError):
+    code = "FORBIDDEN"
+    http_status = status.HTTP_403_FORBIDDEN
+    default_message = "无权操作"
+
+
 # ---------------------------------------------------------------- 404
 
 

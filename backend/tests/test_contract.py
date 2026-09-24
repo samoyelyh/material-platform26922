@@ -33,25 +33,27 @@ def _create_v1(client, pkg_id: str, upload_id: str) -> dict:
     return response.json()
 
 
-def _dispatch(client, pkg_id: str) -> dict:
+def _dispatch(client, pkg_id: str, manager_headers: dict, operator_user) -> dict:
     response = client.post(
         f"/api/design-packages/{pkg_id}/distributions",
-        json={"operatorId": "zhang", "operatorName": "张三", "actor": "肖芸"},
+        json={"operatorUserId": operator_user.id},
+        headers=manager_headers,
     )
     assert response.status_code == 200, response.text
     return response.json()
 
 
-def _bind_asins(client, task_id: str, parent: str, children: list[str]) -> dict:
+def _bind_asins(client, task_id: str, parent: str, children: list[str], operator_headers: dict) -> dict:
     response = client.put(
         f"/api/distributions/{task_id}/asins",
         json={"parentAsin": parent, "children": children, "site": "US", "actor": "张三"},
+        headers=operator_headers,
     )
     assert response.status_code == 200, response.text
     return response.json()
 
 
-def test_contract_material_by_child_asin_happy_path(client, phase2_package):
+def test_contract_material_by_child_asin_happy_path(client, phase2_package, auth_users, auth_tokens):
     """Child ASIN → Batch → 整套 Variant 候选 + category_code + 图片角色。"""
     ctx = phase2_package(3, tags=["球迷款"], design_code="DS-CONTRACT-001")
     pkg_id = ctx["pkg"]["id"]
@@ -83,14 +85,14 @@ def test_contract_material_by_child_asin_happy_path(client, phase2_package):
             )
             assert r.status_code == 200, r.text
 
-    task = _dispatch(client, pkg_id)
+    task = _dispatch(client, pkg_id, auth_tokens["manager"], auth_users["operator"])
     task_id = task["id"]
     assert task["versionCode"] == "V1"
     assert task["variantCount"] == 3
     assert task["status"] == "ACTIVE"
 
     child_asin = "B0ABCDEFGH"
-    _bind_asins(client, task_id, "B0ZZZZZZZZ", [child_asin, "B0AAAAAAAB"])
+    _bind_asins(client, task_id, "B0ZZZZZZZZ", [child_asin, "B0AAAAAAAB"], auth_tokens["operator"])
 
     # ---- 契约查询 ----
     response = client.get(f"/api/contract/materials-by-child-asin/{child_asin}")
@@ -138,13 +140,13 @@ def test_contract_material_by_child_asin_happy_path(client, phase2_package):
         assert leaked not in raw, f"契约泄漏内部字段：{leaked}"
 
 
-def test_contract_other_child_asin_shares_same_batch(client, phase2_package):
+def test_contract_other_child_asin_shares_same_batch(client, phase2_package, auth_users, auth_tokens):
     """Parent 下多个 Child 默认共享同一套 Batch / Variant（不是 Child → 单张副素材）。"""
     ctx = phase2_package(2)
     _confirm_all(client, ctx["upload_id"])
     _create_v1(client, ctx["pkg"]["id"], ctx["upload_id"])
-    task = _dispatch(client, ctx["pkg"]["id"])
-    _bind_asins(client, task["id"], "B0ZZZZZZZZ", ["B0AAAAAAAB", "B0CCCCCCCD"])
+    task = _dispatch(client, ctx["pkg"]["id"], auth_tokens["manager"], auth_users["operator"])
+    _bind_asins(client, task["id"], "B0ZZZZZZZZ", ["B0AAAAAAAB", "B0CCCCCCCD"], auth_tokens["operator"])
 
     a = client.get("/api/contract/materials-by-child-asin/B0AAAAAAAB").json()
     b = client.get("/api/contract/materials-by-child-asin/B0CCCCCCCD").json()
@@ -152,27 +154,27 @@ def test_contract_other_child_asin_shares_same_batch(client, phase2_package):
     assert [v["variantId"] for v in a["variants"]] == [v["variantId"] for v in b["variants"]]
 
 
-def test_contract_child_asin_not_found(client, phase2_package):
+def test_contract_child_asin_not_found(client, phase2_package, auth_users, auth_tokens):
     """未绑定的 Child ASIN → 404，不返回编造关系。"""
     ctx = phase2_package(2)
     _confirm_all(client, ctx["upload_id"])
     _create_v1(client, ctx["pkg"]["id"], ctx["upload_id"])
-    _dispatch(client, ctx["pkg"]["id"])
+    _dispatch(client, ctx["pkg"]["id"], auth_tokens["manager"], auth_users["operator"])
     # 未绑定任何 asin
     response = client.get("/api/contract/materials-by-child-asin/B0NOPE0001")
     assert response.status_code == 404
     assert response.json()["code"] == "CHILD_ASIN_NOT_FOUND"
 
 
-def test_contract_cancelled_distribution_is_not_exposed(client, phase2_package):
+def test_contract_cancelled_distribution_is_not_exposed(client, phase2_package, auth_users, auth_tokens):
     """已取消的派发任务不对外提供素材事实。"""
     ctx = phase2_package(2)
     _confirm_all(client, ctx["upload_id"])
     _create_v1(client, ctx["pkg"]["id"], ctx["upload_id"])
-    task = _dispatch(client, ctx["pkg"]["id"])
-    _bind_asins(client, task["id"], "B0ZZZZZZZZ", ["B0AAAAAAAB"])
-    # 取消派发
-    cancel = client.post(f"/api/distributions/{task['id']}/cancel")
+    task = _dispatch(client, ctx["pkg"]["id"], auth_tokens["manager"], auth_users["operator"])
+    _bind_asins(client, task["id"], "B0ZZZZZZZZ", ["B0AAAAAAAB"], auth_tokens["operator"])
+    # 取消派发（管理角色）
+    cancel = client.post(f"/api/distributions/{task['id']}/cancel", headers=auth_tokens["manager"])
     assert cancel.status_code == 200, cancel.text
     assert cancel.json()["status"] == "CANCELLED"
 
@@ -180,24 +182,24 @@ def test_contract_cancelled_distribution_is_not_exposed(client, phase2_package):
     assert response.status_code == 404
 
 
-def test_contract_task_overview_and_receive(client, phase2_package):
+def test_contract_task_overview_and_receive(client, phase2_package, auth_users, auth_tokens):
     """派发 → 接收 → 回填 ASIN 的真实后端链路（此前仅前端 Mock）。"""
     ctx = phase2_package(3)
     _confirm_all(client, ctx["upload_id"])
     batch = _create_v1(client, ctx["pkg"]["id"], ctx["upload_id"])
 
-    task = _dispatch(client, ctx["pkg"]["id"])
+    task = _dispatch(client, ctx["pkg"]["id"], auth_tokens["manager"], auth_users["operator"])
     task_id = task["id"]
     assert task["packageName"] == ctx["pkg"]["name"]
     assert task["packageCode"] == ctx["pkg"]["code"]
     assert task["variantCount"] == 3
 
-    received = client.post(f"/api/distributions/{task_id}/receive")
+    received = client.post(f"/api/distributions/{task_id}/receive", headers=auth_tokens["operator"])
     assert received.status_code == 200, received.text
     assert received.json()["status"] == "RECEIVED"
     assert received.json()["receivedAt"]
 
-    detail = client.get(f"/api/distributions/{task_id}")
+    detail = client.get(f"/api/distributions/{task_id}", headers=auth_tokens["operator"])
     assert detail.status_code == 200, detail.text
     body = detail.json()
     assert body["batchId"] == batch["id"]

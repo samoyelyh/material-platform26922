@@ -50,6 +50,13 @@ router = APIRouter(tags=["material-variants"])
 
 DEFAULT_ACTOR = "肖芸"
 
+# 素材变更（登记/上传效果图）需登录 + 角色（ADMIN / DESIGN_MANAGER / DESIGNER）
+from app.core.auth import require_roles  # noqa: E402
+from app.core.security import ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER  # noqa: E402
+from app.db.models import User  # noqa: E402
+
+material_editor = require_roles(ROLE_ADMIN, ROLE_DESIGN_MANAGER, ROLE_DESIGNER)
+
 
 def _classify_image(filename: str) -> str:
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
@@ -72,6 +79,7 @@ async def upload_effect_image(
     soleColor: str | None = Form(default=None, description="FINAL_EFFECT 必须为 BLACK / WHITE"),
     actor: str | None = Form(default=None, max_length=128),
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> VariantEffectImageDTO:
     variant = db.get(MaterialVariant, variant_id)
     if variant is None:
@@ -174,6 +182,7 @@ def add_effect_image(
     variant_id: str,
     payload: VariantEffectImageCreateRequest,
     db: Session = Depends(get_db),
+    _: User = Depends(material_editor),
 ) -> VariantEffectImageDTO:
     actor = (payload.actor or "").strip() or DEFAULT_ACTOR
     row = set_variant_effect_image(

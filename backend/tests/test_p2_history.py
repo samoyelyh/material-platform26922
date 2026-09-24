@@ -19,7 +19,7 @@ def _create_batch(client, pkg_id: str, upload_id: str) -> dict:
     return r.json()
 
 
-def test_material_history_is_entity_centric_and_denoised(client, phase2_package, db_session):
+def test_material_history_is_entity_centric_and_denoised(client, phase2_package, db_session, auth_users, auth_tokens):
     """MAT 流转记录：只含自身 + 其副素材 + 相关 Batch/Distribution，不含低价值内部事件、不含其它素材事件。"""
     ctx = phase2_package(2)
     pkg_id = ctx["pkg"]["id"]
@@ -28,15 +28,17 @@ def test_material_history_is_entity_centric_and_denoised(client, phase2_package,
     # 派发 + 接收（产生 DISTRIBUTION 事件）
     task = client.post(
         f"/api/design-packages/{pkg_id}/distributions",
-        json={"operatorId": "zhang", "operatorName": "张三", "actor": "肖芸"},
+        json={"operatorUserId": auth_users["operator"].id},
+        headers=auth_tokens["manager"],
     ).json()
-    client.post(f"/api/distributions/{task['id']}/receive")
+    client.post(f"/api/distributions/{task['id']}/receive", headers=auth_tokens["operator"])
 
-    # 取一个 MAT
+    # 取一个 MAT（先 rollback 刷新 REPEATABLE READ 快照，看到刚提交的 Material）
     from sqlalchemy import select
 
     from app.db.models import Material
 
+    db_session.rollback()
     material = db_session.execute(select(Material)).scalars().first()
     r = client.get(f"/api/materials/{material.material_code}/history")
     assert r.status_code == 200, r.text
@@ -56,7 +58,7 @@ def test_material_history_is_entity_centric_and_denoised(client, phase2_package,
     assert mat_target_ids == {material.id}, f"MAT 事件 target 应只有本 MAT: {mat_target_ids}"
 
 
-def test_variant_history_includes_own_batch_distribution(client, phase2_package, db_session):
+def test_variant_history_includes_own_batch_distribution(client, phase2_package, db_session, auth_users, auth_tokens):
     """Variant 流转记录：含自身 + Batch + Distribution 关键事件，不含低价值内部事件。"""
     ctx = phase2_package(2)
     pkg_id = ctx["pkg"]["id"]
@@ -66,9 +68,10 @@ def test_variant_history_includes_own_batch_distribution(client, phase2_package,
 
     task = client.post(
         f"/api/design-packages/{pkg_id}/distributions",
-        json={"operatorId": "zhang", "operatorName": "张三", "actor": "肖芸"},
+        json={"operatorUserId": auth_users["operator"].id},
+        headers=auth_tokens["manager"],
     ).json()
-    client.post(f"/api/distributions/{task['id']}/receive")
+    client.post(f"/api/distributions/{task['id']}/receive", headers=auth_tokens["operator"])
 
     r = client.get(f"/api/material-variants/{vid}/history")
     assert r.status_code == 200, r.text
