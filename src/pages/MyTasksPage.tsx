@@ -12,14 +12,14 @@ const STATUS_FILTERS: { key: string; label: string; value?: string }[] = [
   { key: 'all', label: '全部' },
   { key: 'ACTIVE', label: '待接收', value: 'ACTIVE' },
   { key: 'RECEIVED', label: '已接收', value: 'RECEIVED' },
-  { key: 'COMPLETED', label: '已完成', value: 'COMPLETED' },
+  { key: 'COMPLETED', label: '已上架', value: 'COMPLETED' },
   { key: 'CANCELLED', label: '已取消', value: 'CANCELLED' },
 ];
 
 const STATUS_LABEL: Record<string, string> = {
   ACTIVE: '待接收',
   RECEIVED: '已接收',
-  COMPLETED: '已回填ASIN',
+  COMPLETED: '已上架',
   CANCELLED: '已取消',
 };
 
@@ -75,7 +75,7 @@ export default function MyTasksPage() {
           <div>
             <h1 className="text-xl font-semibold text-gray-900">我的任务</h1>
             <p className="mt-1 text-xs text-gray-400">
-              点击任意任务进入详情（接收 / 查看副素材 / 回填 ASIN / 下载素材包）。
+              点击任意任务进入详情（接收 / 查看副素材 / 登记上架链接 / 下载素材包）。
             </p>
           </div>
           <button onClick={load} className="text-xs text-[#3d3192] hover:underline">
@@ -114,8 +114,7 @@ export default function MyTasksPage() {
                   <th className="px-4 py-2.5 font-normal">设计包</th>
                   <th className="px-4 py-2.5 font-normal">Batch</th>
                   <th className="px-4 py-2.5 font-normal">副素材</th>
-                  <th className="px-4 py-2.5 font-normal">Parent ASIN</th>
-                  <th className="px-4 py-2.5 font-normal">Child ASIN</th>
+                  <th className="px-4 py-2.5 font-normal">上架链接</th>
                   <th className="px-4 py-2.5 font-normal">状态</th>
                   <th className="px-4 py-2.5 font-normal">创建时间</th>
                   <th className="px-4 py-2.5 font-normal">接收时间</th>
@@ -136,8 +135,7 @@ export default function MyTasksPage() {
                       <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600">{task.versionCode}</span>
                     </td>
                     <td className="px-4 py-3 font-mono text-[11px]">{task.variantCount}</td>
-                    <td className="px-4 py-3 font-mono text-[11px]">{task.parentAsin?.asin ?? '—'}</td>
-                    <td className="px-4 py-3 font-mono text-[11px]">{task.children.length}</td>
+                    <td className="px-4 py-3 font-mono text-[11px]">{task.listingCount ?? 0}</td>
                     <td className="px-4 py-3">
                       <StatusBadge tone={STATUS_TONE[task.status] ?? 'neutral'}>
                         {STATUS_LABEL[task.status] ?? task.status}

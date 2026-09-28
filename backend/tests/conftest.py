@@ -170,6 +170,8 @@ def clean_tables():
         for table in [
             "activity_logs",
             "users",
+            "listing_materials",
+            "listings",
             "distribution_child_asins",
             "distribution_parent_asins",
             "distribution_task_items",

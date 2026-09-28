@@ -667,6 +667,7 @@ export interface DistributionTaskDto {
   assignedAt: string
   receivedAt?: string | null
   completedAt?: string | null
+  listingCount?: number
   cancelledAt?: string | null
   remark?: string | null
   items: DistributionTaskItemDto[]
@@ -923,6 +924,30 @@ export interface OperatorOptionDto {
   displayName: string
 }
 
+// ---------------------------------------------------------------- 上架 Listing（素材 ↔ 链接）
+
+export interface ListingDto {
+  id: string
+  distributionTaskId: string
+  listingUrl: string | null
+  parentAsin: string | null
+  store: string | null
+  site: string | null
+  operatorUserId?: string | null
+  createdBy: string
+  createdAt: string
+  updatedAt: string
+  parentAsinBoundAt?: string | null
+  materialCount: number
+  variantCount: number
+}
+
+export interface ListingCreateResponseDto {
+  listing: ListingDto
+  /** true = 该 URL 已存在，返回的是现有 Listing（已自动关联当前任务素材） */
+  existed: boolean
+}
+
 export const authApi = {
   /** 账号密码登录 → JWT + 用户信息 */
   login: (username: string, password: string) =>
@@ -949,6 +974,37 @@ export const usersApi = {
 }
 
 export const materialApi = {
+
+  // ---- 上架 Listing（素材 ↔ 链接 多对多）----
+  /** 新增上架链接（URL 必填，Parent ASIN 可空后补；同 URL 重复时返回现有） */
+  createTaskListing: (taskId: string, payload: { listingUrl: string; parentAsin?: string; store?: string; site?: string }) =>
+    request<ListingCreateResponseDto>(
+      `/distributions/${encodeURIComponent(taskId)}/listings`,
+      jsonInit('POST', payload),
+    ),
+
+  /** 该任务的上架链接列表 */
+  listTaskListings: (taskId: string) =>
+    request<ListingDto[]>(`/distributions/${encodeURIComponent(taskId)}/listings`),
+
+  /** 单条 Listing */
+  getListing: (listingId: string) =>
+    request<ListingDto>(`/listings/${encodeURIComponent(listingId)}`),
+
+  /** 补 Parent ASIN / 改 URL / 店铺站点（更新本行不新建） */
+  patchListing: (
+    listingId: string,
+    payload: { listingUrl?: string; parentAsin?: string; store?: string; site?: string },
+  ) => request<ListingDto>(`/listings/${encodeURIComponent(listingId)}`, jsonInit('PATCH', payload)),
+
+  /** 主素材（MAT）被哪些 Listing 使用 */
+  materialListings: (materialCode: string) =>
+    request<ListingDto[]>(`/materials/${encodeURIComponent(materialCode)}/listings`),
+
+  /** 副素材出现在哪些 Listing */
+  variantListings: (variantId: string) =>
+    request<ListingDto[]>(`/material-variants/${encodeURIComponent(variantId)}/listings`),
+
   health: () => request<HealthDto>('/health'),
 
   // ---- 设计包 ----

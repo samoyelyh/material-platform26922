@@ -912,6 +912,74 @@ class DistributionTaskDTO(BaseModel):
     children: list[ChildAsinDTO] = Field(default_factory=list)
     variantCount: int = 0
     deliveryRound: int = 0
+    listingCount: int = 0
+
+
+# ---------------------------------------------------------------- 上架 Listing（素材 ↔ 链接）
+
+
+class ListingDTO(BaseModel):
+    id: str
+    distributionTaskId: str
+    listingUrl: str | None = None
+    parentAsin: str | None = None
+    store: str | None = None
+    site: str | None = None
+    operatorUserId: str | None = None
+    createdBy: str
+    createdAt: datetime
+    updatedAt: datetime
+    parentAsinBoundAt: datetime | None = None
+
+    # ---- 聚合 ----
+    materialCount: int = 0
+    variantCount: int = 0
+
+    @classmethod
+    def from_entity(cls, row, *, material_count: int = 0, variant_count: int = 0) -> "ListingDTO":
+        return cls(
+            id=row.id,
+            distributionTaskId=row.distribution_task_id,
+            listingUrl=row.listing_url,
+            parentAsin=row.parent_asin,
+            store=row.store,
+            site=row.site,
+            operatorUserId=row.operator_user_id,
+            createdBy=row.created_by,
+            createdAt=row.created_at,
+            updatedAt=row.updated_at,
+            parentAsinBoundAt=row.parent_asin_bound_at,
+            materialCount=material_count,
+            variantCount=variant_count,
+        )
+
+
+class ListingCreateRequest(BaseModel):
+    """创建 Listing：URL 必填；Parent ASIN 可空（后补）。不要求 Child ASIN。"""
+
+    listingUrl: str = Field(min_length=1, max_length=2048)
+    parentAsin: str | None = Field(default=None, max_length=32)
+    store: str | None = Field(default=None, max_length=128)
+    site: str | None = Field(default=None, max_length=8)
+    actor: str | None = Field(default=None, max_length=128)
+
+
+class ListingPatchRequest(BaseModel):
+    """补 Parent ASIN / 改 URL / 店铺站点。全部可选。"""
+
+    listingUrl: str | None = Field(default=None, min_length=1, max_length=2048)
+    parentAsin: str | None = Field(default=None, max_length=32)
+    store: str | None = Field(default=None, max_length=128)
+    site: str | None = Field(default=None, max_length=8)
+    actor: str | None = Field(default=None, max_length=128)
+
+
+class ListingMaterialLinkRequest(BaseModel):
+    """建立素材 ↔ Listing 关联：materialId（MAT）/ variantId（副素材）至少一项。"""
+
+    materialId: str | None = Field(default=None, max_length=64)
+    variantId: str | None = Field(default=None, max_length=64)
+    actor: str | None = Field(default=None, max_length=128)
 
 
 # ---------------------------------------------------------------- Variant 效果图角色

@@ -469,7 +469,7 @@ class ActivityLog(Base):
     __table_args__ = (
         CheckConstraint(
             "target_type IN ('DESIGN_PACKAGE','MATERIAL','MATERIAL_VARIANT','DERIVATIVE_BATCH',"
-            "'DISTRIBUTION','PARENT_ASIN','CHILD_ASIN','UPLOAD','ASSET')",
+            "'DISTRIBUTION','PARENT_ASIN','CHILD_ASIN','UPLOAD','ASSET','LISTING')",
             name="ck_activity_logs_target_type",
         ),
         Index("ix_activity_logs_pkg_created", "design_package_id", "created_at"),
@@ -813,6 +813,11 @@ class DistributionTask(Base):
         uselist=False,
         foreign_keys="DistributionParentAsin.distribution_task_id",
     )
+    listings: Mapped[list["Listing"]] = relationship(
+        back_populates="distribution_task",
+        cascade="all, delete-orphan",
+        foreign_keys="Listing.distribution_task_id",
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -904,6 +909,85 @@ class DistributionChildAsin(Base):
         ),
         Index("ix_distribution_child_asin", "child_asin"),
         {"comment": "派发任务 Child ASIN（订单中心契约检索入口）"},
+    )
+
+
+# ---------------------------------------------------------------- 上架 Listing（素材 ↔ 链接 多对多）
+#
+# 业务原则（本轮调整）：
+#   - Listing URL 是上架记录的核心；Parent ASIN 是后补属性（可空，运营拿到后 PATCH 更新本行）
+#   - 一条 Listing 可挂多个素材；一个素材可被多个 Listing 使用（listing_materials M2M）
+#   - 一个 DistributionTask 可产生多个 Listing
+#   - Child ASIN 不参与素材归属（旧表保留兼容，Contract 不动）
+
+
+class Listing(Base):
+    """上架 Listing：URL 必填（新数据由 API 强制），Parent ASIN 可空后补。"""
+
+    __tablename__ = "listings"
+
+    id: Mapped[str] = mapped_column(VARCHAR(64), primary_key=True)
+    distribution_task_id: Mapped[str] = mapped_column(
+        VARCHAR(64), ForeignKey("distribution_tasks.id", ondelete="CASCADE"), nullable=False
+    )
+    # 标准化后的 canonical URL（trim + 去追踪参数）；历史迁移行可能为 NULL（不伪造 URL）
+    listing_url: Mapped[str | None] = mapped_column(VARCHAR(2048), nullable=True)
+    # Parent ASIN 是 Listing 的后补属性，不是素材主键
+    parent_asin: Mapped[str | None] = mapped_column(VARCHAR(32), nullable=True)
+    store: Mapped[str | None] = mapped_column(VARCHAR(128), nullable=True)
+    site: Mapped[str | None] = mapped_column(VARCHAR(8), nullable=True)
+    operator_user_id: Mapped[str | None] = mapped_column(
+        VARCHAR(64), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_by: Mapped[str] = mapped_column(VARCHAR(128), nullable=False)
+    created_at: Mapped[datetime] = _ts()
+    updated_at: Mapped[datetime] = mapped_column(
+        DATETIME(fsp=6), nullable=False, server_default=func.now(6), onupdate=func.now(6)
+    )
+    parent_asin_bound_at: Mapped[datetime | None] = mapped_column(DATETIME(fsp=6), nullable=True)
+
+    distribution_task: Mapped[DistributionTask] = relationship(
+        back_populates="listings", foreign_keys=[distribution_task_id]
+    )
+    materials: Mapped[list["ListingMaterial"]] = relationship(
+        back_populates="listing",
+        cascade="all, delete-orphan",
+        foreign_keys="ListingMaterial.listing_id",
+    )
+
+    __table_args__ = (
+        # 防重复兜底：同一 URL 只允许一条 Listing。前缀唯一索引（URL 2048×utf8mb4 超 MySQL 键长限制）
+        Index("uq_listings_url", "listing_url", unique=True, mysql_length={"listing_url": 768}),
+        Index("ix_listings_task", "distribution_task_id"),
+        Index("ix_listings_operator_user", "operator_user_id"),
+        {"comment": "上架 Listing（URL 为核心，Parent ASIN 后补；一任务可多条）"},
+    )
+
+
+class ListingMaterial(Base):
+    """素材 ↔ Listing 多对多：material_id=主素材 MAT / variant_id=副素材，至少一项。"""
+
+    __tablename__ = "listing_materials"
+
+    id: Mapped[str] = mapped_column(VARCHAR(64), primary_key=True)
+    listing_id: Mapped[str] = mapped_column(
+        VARCHAR(64), ForeignKey("listings.id", ondelete="CASCADE"), nullable=False
+    )
+    material_id: Mapped[str | None] = mapped_column(
+        VARCHAR(64), ForeignKey("materials.id", ondelete="CASCADE"), nullable=True
+    )
+    variant_id: Mapped[str | None] = mapped_column(
+        VARCHAR(64), ForeignKey("material_variants.id", ondelete="CASCADE"), nullable=True
+    )
+    created_at: Mapped[datetime] = _ts()
+
+    listing: Mapped[Listing] = relationship(back_populates="materials", foreign_keys=[listing_id])
+
+    __table_args__ = (
+        Index("ix_listing_materials_listing", "listing_id"),
+        Index("ix_listing_materials_material", "material_id"),
+        Index("ix_listing_materials_variant", "variant_id"),
+        {"comment": "素材 ↔ Listing 多对多（material_id=MAT / variant_id=副素材）"},
     )
 
 

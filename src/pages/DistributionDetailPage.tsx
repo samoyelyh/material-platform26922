@@ -1,32 +1,29 @@
-import { useMemo, useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useNavigate, useParams } from 'react-router'
-import { CheckCircle2, ChevronRight, Download, ExternalLink, PackageCheck } from 'lucide-react'
+import { CheckCircle2, ChevronRight, Download, ExternalLink, Link2, PackageCheck, Plus } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Textarea } from '@/components/ui/textarea'
 import { ActivityTimeline, StatusBadge } from '@/components/material/WorkflowPrimitives'
-import { AMAZON_SITES, buildAsinUrl, parseAsinList, resolveListingUrl } from '@/lib/asin'
+import { AMAZON_SITES, resolveListingUrl } from '@/lib/asin'
 import { UPLOAD_TYPE_LABEL, formatDateTime } from '@/lib/workflow'
-import { API_BASE, API_ENABLED } from '@/services/apiClient'
+import { API_BASE, API_ENABLED, materialApi, type ListingDto } from '@/services/apiClient'
 import {
-  bindAsins,
   getTaskOverview,
   loadAllPackagesFromApi,
   loadDistributionTaskFromApi,
   receiveTask,
   useWorkflowState,
 } from '@/store/workflowStore'
-import type { MarketplaceSiteCode } from '@/types/material-workflow'
 
 interface Props {
   /** 由路由传入，默认取当前登录运营 */
   actorName?: string
 }
 
-/** 运营端：接收素材 → 查看/下载副素材 → 回填 Parent / Child ASIN */
+/** 运营端：接收素材 → 查看/下载副素材 → 新增上架链接（Listing URL 先行，Parent ASIN 后补） */
 export default function DistributionDetailPage({ actorName }: Props) {
   const navigate = useNavigate()
   const { taskId = '' } = useParams()
@@ -35,12 +32,27 @@ export default function DistributionDetailPage({ actorName }: Props) {
   const overview = getTaskOverview(taskId)
   const task = overview?.task
 
-  // 真实后端模式下：先 hydrate 设计包（副素材/资产），再拉取派发任务，之后回填表单
+  // 真实后端模式下：先 hydrate 设计包（副素材/资产），再拉取派发任务与上架链接
   const [loaded, setLoaded] = useState(!API_ENABLED)
-  const [parent, setParent] = useState('')
-  const [childrenText, setChildrenText] = useState('')
-  const [site, setSite] = useState<MarketplaceSiteCode>('US')
+  const [listings, setListings] = useState<ListingDto[]>([])
   const [downloaded, setDownloaded] = useState(false)
+  // 新增上架链接表单
+  const [listingUrl, setListingUrl] = useState('')
+  const [listingParent, setListingParent] = useState('')
+  const [listingStore, setListingStore] = useState('')
+  const [listingSite, setListingSite] = useState('US')
+  const [saving, setSaving] = useState(false)
+  // 后补 Parent ASIN（行内编辑）
+  const [parentDraft, setParentDraft] = useState<Record<string, string>>({})
+
+  const loadListings = useCallback(async () => {
+    if (!API_ENABLED || !taskId) return
+    try {
+      setListings(await materialApi.listTaskListings(taskId))
+    } catch {
+      setListings([])
+    }
+  }, [taskId])
 
   useEffect(() => {
     if (!API_ENABLED) return
@@ -49,6 +61,8 @@ export default function DistributionDetailPage({ actorName }: Props) {
       try {
         await loadAllPackagesFromApi()
         await loadDistributionTaskFromApi(taskId)
+        const rows = await materialApi.listTaskListings(taskId)
+        if (!cancelled) setListings(rows)
       } catch {
         // 拉取失败保留 not-found 渲染；不静默回退 Mock
       }
@@ -59,16 +73,6 @@ export default function DistributionDetailPage({ actorName }: Props) {
     }
   }, [taskId])
 
-  // 任务加载后回填表单（prev 保护：不覆盖用户已输入的内容）
-  useEffect(() => {
-    if (!task) return
-    setParent((prev) => prev || task.parentAsin?.asin || '')
-    setChildrenText((prev) => prev || (task.children ?? []).map((c) => c.asin).join('\n'))
-    setSite((prev) => prev || (task.parentAsin?.site as MarketplaceSiteCode) || 'US')
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [task?.id])
-
-  const parsed = useMemo(() => parseAsinList(childrenText), [childrenText])
   const variants = overview?.variants ?? []
   const logs = overview?.logs ?? []
   const actor = actorName || task?.operatorName || '运营'
@@ -91,8 +95,9 @@ export default function DistributionDetailPage({ actorName }: Props) {
     )
   }
 
-  const parentValid = /^B0[A-Z0-9]{8}$/.test(parent.trim().toUpperCase())
-  const canSubmit = task.status !== 'ACTIVE' && parentValid && parsed.asins.length > 0 && parsed.invalid.length === 0
+  const urlReady = /^https?:\/\/.+/i.test(listingUrl.trim())
+  const parentReady = !listingParent.trim() || /^B0[A-Z0-9]{8}$/.test(listingParent.trim().toUpperCase())
+  const canAddListing = task.status !== 'ACTIVE' && task.status !== 'CANCELLED' && urlReady && parentReady && !saving
 
   const handleReceive = async () => {
     try {
@@ -122,13 +127,48 @@ export default function DistributionDetailPage({ actorName }: Props) {
     toast.success('已开始下载素材包')
   }
 
-  const handleSubmit = async () => {
-    const result = await bindAsins(task.id, { parentAsin: parent, childrenText, site, actor })
-    if (result.error) {
-      toast.error(result.error)
+  const handleAddListing = async () => {
+    if (!canAddListing) return
+    setSaving(true)
+    try {
+      const resp = await materialApi.createTaskListing(task.id, {
+        listingUrl: listingUrl.trim(),
+        parentAsin: listingParent.trim() || undefined,
+        store: listingStore.trim() || undefined,
+        site: listingSite || undefined,
+      })
+      if (resp.existed) {
+        toast.success('该链接已存在，已把当前任务的素材关联到现有上架链接（未重复创建）')
+      } else {
+        toast.success('上架链接已保存' + (listingParent.trim() ? '' : '，Parent ASIN 待补充'))
+      }
+      setListingUrl('')
+      setListingParent('')
+      setListingStore('')
+      await loadListings()
+      await loadDistributionTaskFromApi(task.id)
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '保存上架链接失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 后补 / 更新 Parent ASIN（更新原行，不新建） */
+  const handleBindParent = async (listingId: string) => {
+    const value = (parentDraft[listingId] ?? '').trim().toUpperCase()
+    if (!/^B0[A-Z0-9]{8}$/.test(value)) {
+      toast.error('Parent ASIN 格式应为 B0 + 8 位字母或数字')
       return
     }
-    toast.success('ASIN 关联完成，已写入维护记录')
+    try {
+      await materialApi.patchListing(listingId, { parentAsin: value })
+      toast.success('Parent ASIN 已补充')
+      setParentDraft((prev) => ({ ...prev, [listingId]: '' }))
+      await loadListings()
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : '补充 Parent ASIN 失败')
+    }
   }
 
   return (
@@ -148,7 +188,7 @@ export default function DistributionDetailPage({ actorName }: Props) {
         <div className="flex items-center justify-between">
           <div>
             <h1 className="text-xl font-semibold text-gray-900">运营接收素材</h1>
-            <p className="mt-1 text-xs text-gray-400">确认接收后查看副素材并回填 Parent / Child ASIN。</p>
+            <p className="mt-1 text-xs text-gray-400">确认接收后查看副素材、下载素材包，并登记上架链接（Listing URL 先行，Parent ASIN 后补）。</p>
           </div>
           <StatusBadge tone={task.status === 'COMPLETED' ? 'green' : task.status === 'RECEIVED' ? 'purple' : task.status === 'CANCELLED' ? 'neutral' : 'amber'}>
             {DISTRIBUTION_STATUS_LABEL[task.status]}
@@ -247,84 +287,139 @@ export default function DistributionDetailPage({ actorName }: Props) {
           </CardContent>
         </Card>
 
-        {/* ------------------------------------------------------ ASIN 回填 */}
+        {/* ------------------------------------------------------ 上架记录（Listing） */}
         <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
           <Card>
-            <CardHeader><CardTitle className="text-base">回填 ASIN</CardTitle></CardHeader>
+            <CardHeader><CardTitle className="text-base">上架记录（Listing）</CardTitle></CardHeader>
             <CardContent className="space-y-5">
-              <div className="grid gap-4 md:grid-cols-[1fr_180px]">
+              {/* 已有上架链接列表：URL 先行，Parent ASIN 可空后补 */}
+              {listings.length === 0 ? (
+                <p className="rounded-md border border-dashed border-gray-200 py-6 text-center text-xs text-gray-400">
+                  还没有上架链接。上架 Amazon 后，先粘贴 Listing URL 即可；Parent ASIN 拿到后再补。
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {listings.map((item) => (
+                    <div key={item.id} className="rounded-md border border-gray-200 px-3 py-2.5">
+                      <div className="flex items-center gap-2 text-xs">
+                        <Link2 className="h-3.5 w-3.5 shrink-0 text-gray-400" />
+                        {item.listingUrl ? (
+                          <a
+                            href={item.listingUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="truncate font-mono text-[#3d3192] hover:underline"
+                            title={item.listingUrl}
+                          >
+                            {item.listingUrl}
+                          </a>
+                        ) : (
+                          <span className="text-gray-400">（历史记录，无 URL）</span>
+                        )}
+                        <span className="ml-auto shrink-0 text-gray-400">{formatDateTime(item.createdAt)}</span>
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-3 text-[11px] text-gray-500">
+                        <span>
+                          Parent ASIN：
+                          {item.parentAsin ? (
+                            <span className="font-mono font-medium text-gray-800">{item.parentAsin}</span>
+                          ) : (
+                            <span className="rounded bg-amber-50 px-1.5 py-0.5 text-amber-600">待补充</span>
+                          )}
+                        </span>
+                        <span>店铺：<span className="text-gray-700">{item.store || '—'}</span></span>
+                        <span>站点：<span className="text-gray-700">{item.site || '—'}</span></span>
+                        <span>素材：<span className="text-gray-700">{item.materialCount} 主 / {item.variantCount} 副</span></span>
+                        {/* 后补 Parent ASIN（行内编辑，更新原行不新建） */}
+                        <span className="ml-auto flex items-center gap-1.5">
+                          <Input
+                            className="h-7 w-32 text-[11px]"
+                            placeholder="B0XXXXXXXX"
+                            value={parentDraft[item.id] ?? ''}
+                            onChange={(event) =>
+                              setParentDraft((prev) => ({ ...prev, [item.id]: event.target.value }))
+                            }
+                          />
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 px-2 text-[11px]"
+                            disabled={!parentDraft[item.id]?.trim()}
+                            onClick={() => void handleBindParent(item.id)}
+                          >
+                            {item.parentAsin ? '更新 Parent' : '补 Parent ASIN'}
+                          </Button>
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* 新增上架链接 */}
+              <div className="space-y-3 rounded-md bg-gray-50 px-3 py-3">
+                <p className="text-xs font-medium text-gray-600">
+                  <Plus className="mr-1 inline h-3.5 w-3.5" />添加上架链接
+                  <span className="ml-2 font-normal text-gray-400">同一 URL 重复录入时自动关联到现有链接，不会重复建</span>
+                </p>
                 <label className="block space-y-1.5 text-sm">
-                  <span className="font-medium">Parent ASIN <b className="text-red-500">*</b></span>
+                  <span className="font-medium">Listing URL <b className="text-red-500">*</b></span>
                   <Input
-                    placeholder="B0XXXXXXXX"
-                    value={parent}
-                    onChange={(event) => setParent(event.target.value.toUpperCase().trim())}
+                    placeholder="https://www.amazon.com/dp/B0XXXX（粘贴即可，追踪参数自动清理）"
+                    value={listingUrl}
+                    onChange={(event) => setListingUrl(event.target.value)}
                   />
-                  <span className="text-xs text-gray-400">
-                    Parent ASIN 本身即唯一业务标识；绑定后该 Parent 下全部 Child 默认共享
-                    {task.versionCode} 的 {variants.length} 张副素材。
-                  </span>
+                  {listingUrl && !urlReady && (
+                    <span className="text-xs text-red-600">URL 必须以 http:// 或 https:// 开头</span>
+                  )}
                 </label>
-                <label className="block space-y-1.5 text-sm">
-                  <span className="font-medium">站点<span className="ml-1 text-xs font-normal text-gray-400">（选填，仅用于生成跳转链接）</span></span>
-                  <Select value={site} onValueChange={(value) => setSite(value as MarketplaceSiteCode)}>
-                    <SelectTrigger><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {AMAZON_SITES.map((item) => (
-                        <SelectItem key={item.code} value={item.code}>{item.label}（{item.domain}）</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  <span className="text-xs text-gray-400">站点不参与唯一键，缺失也不影响 ASIN 保存。</span>
-                </label>
+                <div className="grid gap-3 md:grid-cols-3">
+                  <label className="block space-y-1.5 text-sm">
+                    <span className="font-medium">Parent ASIN<span className="ml-1 text-xs font-normal text-gray-400">（选填，可后补）</span></span>
+                    <Input
+                      placeholder="B0XXXXXXXX"
+                      value={listingParent}
+                      onChange={(event) => setListingParent(event.target.value)}
+                    />
+                    {listingParent && !parentReady && (
+                      <span className="text-xs text-red-600">格式应为 B0 + 8 位字母或数字</span>
+                    )}
+                  </label>
+                  <label className="block space-y-1.5 text-sm">
+                    <span className="font-medium">店铺<span className="ml-1 text-xs font-normal text-gray-400">（选填）</span></span>
+                    <Input
+                      placeholder="如 店铺A"
+                      value={listingStore}
+                      onChange={(event) => setListingStore(event.target.value)}
+                    />
+                  </label>
+                  <label className="block space-y-1.5 text-sm">
+                    <span className="font-medium">站点</span>
+                    <Select value={listingSite} onValueChange={setListingSite}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {AMAZON_SITES.map((item) => (
+                          <SelectItem key={item.code} value={item.code}>{item.label}（{item.domain}）</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </label>
+                </div>
+                <div className="flex items-center gap-3">
+                  <Button className="bg-[#3d3192] hover:bg-[#32277a]" disabled={!canAddListing} onClick={handleAddListing}>
+                    <CheckCircle2 className="h-4 w-4" />
+                    {saving ? '保存中…' : '保存上架链接'}
+                  </Button>
+                  {task.status === 'ACTIVE' && <p className="text-xs text-gray-400">请先点击上方「接收素材」后再登记。</p>}
+                </div>
               </div>
-
-              {parent && !parentValid && <p className="text-xs text-red-600">Parent ASIN 格式应为 B0 + 8 位字母或数字。</p>}
-              {parentValid && (
-                <a
-                  href={buildAsinUrl(parent, site)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1 font-mono text-xs text-[#3d3192] hover:underline"
-                >
-                  {parent} <ExternalLink className="h-3 w-3" />
-                </a>
-              )}
-
-              <label className="block space-y-1.5 text-sm">
-                <span className="font-medium">Child ASIN <b className="text-red-500">*</b></span>
-                <Textarea
-                  value={childrenText}
-                  onChange={(event) => setChildrenText(event.target.value)}
-                  className="min-h-40 font-mono text-xs"
-                  placeholder="一行一个，也支持 Excel 整列粘贴（自动 trim / 去空行 / 去重）"
-                />
-                <span className="text-xs text-gray-400">
-                  识别到 <b className="text-gray-700">{parsed.asins.length}</b> 个 Child ASIN
-                  {parsed.duplicateCount > 0 && <>，已自动去重 {parsed.duplicateCount} 个</>}
-                </span>
-              </label>
-              {parsed.invalid.length > 0 && (
-                <p className="text-xs text-red-600">存在格式不正确的 Child ASIN：{parsed.invalid.slice(0, 6).join('、')}</p>
-              )}
-
-              <div className="rounded-md bg-gray-50 px-3 py-2 text-xs text-gray-500">
-                关联关系：Parent ASIN → 一整套上架版本 {task.versionCode}（{variants.map((v) => v.displayCode).slice(0, 6).join('、')}
-                {variants.length > 6 ? ' …' : ''}）。Parent 下所有 Child ASIN 默认共享这套素材，不是 Child → 单张副素材的一一关系。
-              </div>
-
-              <Button className="bg-[#3d3192] hover:bg-[#32277a]" disabled={!canSubmit} onClick={handleSubmit}>
-                <CheckCircle2 className="h-4 w-4" />
-                {task.status === 'COMPLETED' ? '更新 ASIN 关联' : '提交ASIN关联'}
-              </Button>
-              {task.status === 'ACTIVE' && <p className="text-xs text-gray-400">请先点击上方「接收素材」后再提交。</p>}
             </CardContent>
           </Card>
 
           <div className="space-y-4">
             {task.parentAsin && (
               <Card>
-                <CardHeader><CardTitle className="text-base">当前 ASIN 关联</CardTitle></CardHeader>
+                <CardHeader><CardTitle className="text-base">历史 ASIN 关联</CardTitle></CardHeader>
                 <CardContent className="space-y-3 text-xs">
                   <div>
                     <p className="text-gray-400">Parent ASIN</p>
@@ -376,6 +471,6 @@ export default function DistributionDetailPage({ actorName }: Props) {
 const DISTRIBUTION_STATUS_LABEL: Record<string, string> = {
   ACTIVE: '待接收',
   RECEIVED: '已接收',
-  COMPLETED: '已回填ASIN',
+  COMPLETED: '已上架',
   CANCELLED: '已取消',
 }

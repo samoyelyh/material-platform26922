@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ChevronLeft, ChevronRight, ExternalLink, ScanSearch, X } from 'lucide-react';
-import type { Asin, Material, MaterialDesignRef } from '@/types/material';
+import type { Material, MaterialDesignRef } from '@/types/material';
 import {
   getDesignsOfMaterial,
   getMaterialHistoryFromApi,
@@ -14,12 +14,12 @@ import {
 } from '@/store/workflowStore';
 import { toast } from 'sonner';
 import { materialApi, API_ENABLED, resolveMediaUrl, type VariantEffectImageDto } from '@/services/apiClient';
-import { MaterialAsinList } from './MaterialAsinList';
 import { MaterialBasicInfo } from './MaterialBasicInfo';
 import { MaterialDesignList } from './MaterialDesignList';
+import { MaterialListings } from './MaterialListings';
 import { TagPicker } from './TagPicker';
 
-const TABS = ['基本信息', '关联设计', '关联ASIN', '数据表现', '副素材', '流转记录'] as const;
+const TABS = ['基本信息', '关联设计', '上架信息', '数据表现', '副素材', '流转记录'] as const;
 type TabKey = (typeof TABS)[number];
 
 interface Props {
@@ -160,7 +160,7 @@ interface VariantDetailState {
   loading: boolean;
 }
 
-const VARIANT_TABS = ['基本信息', '图片资产', '关联ASIN', '流转记录'] as const;
+const VARIANT_TABS = ['基本信息', '图片资产', '上架信息', '流转记录'] as const;
 type VariantTabKey = (typeof VARIANT_TABS)[number];
 
 /** 图片角色中文名与提示（MATERIAL_SOURCE=素材原图；FINAL_EFFECT=带设计的最终效果图） */
@@ -411,78 +411,8 @@ function VariantDetailView({
     );
   };
 
-  /** 关联ASIN Tab：反向聚合展示（Variant → Batch → DistributionTask → Parent/Child ASIN） */
-  const renderDistributions = () => {
-    const rows = detail.distributions ?? [];
-    if (!rows.length) {
-      return (
-        <div className="px-5 py-16 text-center text-[13px] text-gray-400">
-          该副素材所属 Batch 尚未关联派发任务 / ASIN
-          <div className="mt-1 text-[11px] text-gray-400">
-            关系为 Child ASIN → Batch → Variant 候选（不是 Child 绑定单个 Variant）
-          </div>
-        </div>
-      );
-    }
-    return (
-      <div className="px-5 py-4">
-        <p className="mb-3 text-[11px] text-gray-400">
-          反向聚合自真实 Distribution 数据：Variant → Batch → DistributionTask → Parent / Child ASIN。
-        </p>
-        <div className="space-y-3">
-          {rows.map((row) => (
-            <div key={row.distributionTaskId} className="rounded-md border border-gray-100 bg-white p-3 text-xs">
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-gray-700">
-                <span className="font-medium text-gray-800">{row.packageName}</span>
-                <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-500">{row.batchCode}</span>
-                <span className="text-gray-400">运营：{row.operatorName}</span>
-                <span className="text-gray-400">状态：{row.status}</span>
-              </div>
-              <div className="mt-2 space-y-1">
-                <div>
-                  <span className="text-gray-400">Parent ASIN：</span>
-                  {row.parentAsin ? (
-                    <a
-                      href={resolveMediaUrl('') || '#'}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        window.open(`https://www.amazon.com/dp/${row.parentAsin}`, '_blank', 'noreferrer');
-                      }}
-                      className="font-mono text-[#3d3192] hover:underline"
-                    >
-                      {row.parentAsin}
-                    </a>
-                  ) : (
-                    <span className="text-gray-300">—</span>
-                  )}
-                </div>
-                <div>
-                  <span className="text-gray-400">Child ASIN（{row.children.length}）：</span>
-                  {row.children.length ? (
-                    <span className="flex flex-wrap gap-1">
-                      {row.children.map((c) => (
-                        <a
-                          key={c.asin}
-                          href={`https://www.amazon.com/dp/${c.asin}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="rounded border border-gray-200 px-1.5 py-0.5 font-mono text-[11px] text-gray-600 hover:border-[#3d3192] hover:text-[#3d3192]"
-                        >
-                          {c.asin}
-                        </a>
-                      ))}
-                    </span>
-                  ) : (
-                    <span className="text-gray-300">—</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  };
+  /** 上架信息 Tab：该副素材出现在哪些 Listing（素材 ↔ 链接 多对多） */
+  // （旧「关联ASIN」反向聚合已下架：Child ASIN 不再参与素材归属，上架关系由 Listing 承载）
 
   return (
     <div>
@@ -545,7 +475,7 @@ function VariantDetailView({
 
       {tab === '基本信息' && renderBasic()}
       {tab === '图片资产' && renderImages()}
-      {tab === '关联ASIN' && renderDistributions()}
+      {tab === '上架信息' && <MaterialListings variantId={variantId} />}
       {tab === '流转记录' && (
         <HistoryTab entries={state.history} emptyHint="这个副素材还没有任何流转记录" />
       )}
@@ -565,16 +495,14 @@ export function MaterialDrawer({ material, onClose, initialVariantId, onFindSimi
     materialId: string;
     tab: TabKey;
     design: MaterialDesignRef | null;
-    asin: Asin | null;
-  }>({ materialId: '', tab: '基本信息', design: null, asin: null });
+  }>({ materialId: '', tab: '基本信息', design: null });
   const current =
     nav.materialId === materialId
       ? nav
-      : { materialId, tab: '基本信息' as TabKey, design: null, asin: null };
-  const { tab, design: crumbDesign, asin: crumbAsin } = current;
+      : { materialId, tab: '基本信息' as TabKey, design: null };
+  const { tab, design: crumbDesign } = current;
   const setTab = (next: TabKey) => setNav({ ...current, tab: next });
   const setCrumbDesign = (next: MaterialDesignRef | null) => setNav({ ...current, design: next });
-  const setCrumbAsin = (next: Asin | null) => setNav({ ...current, asin: next });
 
   // 抽屉内可以下钻到副素材详情（ variantId 非空时显示副详情，不回到素材列表 ）。
   // 用「按素材 id 派生」而不是 useState(initialVariantId)：
@@ -619,8 +547,6 @@ export function MaterialDrawer({ material, onClose, initialVariantId, onFindSimi
   const packageCount = new Set(
     designs.flatMap((design) => design.packages.map((p) => p.packageId)),
   ).size;
-  // 关联 ASIN 属 Phase 3：没有真实数据就不显示数字
-  const asins: Asin[] = [];
 
   // 副素材详情视图：点了副素材后整个抽屉切过去
   if (detailVariantId) {
@@ -671,7 +597,6 @@ export function MaterialDrawer({ material, onClose, initialVariantId, onFindSimi
               className="shrink-0 text-[#3d3192] hover:underline"
               onClick={() => {
                 setCrumbDesign(null);
-                setCrumbAsin(null);
                 setTab('基本信息');
               }}
             >
@@ -683,7 +608,6 @@ export function MaterialDrawer({ material, onClose, initialVariantId, onFindSimi
                 <button
                   className="shrink-0 text-[#3d3192] hover:underline"
                   onClick={() => {
-                    setCrumbAsin(null);
                     setTab('副素材');
                   }}
                 >
@@ -691,12 +615,6 @@ export function MaterialDrawer({ material, onClose, initialVariantId, onFindSimi
                 </button>
                 <ChevronRight className="h-3 w-3 shrink-0" />
                 <span className="shrink-0 text-gray-500">{crumbDesign.designerName || '未填写美工'}</span>
-              </>
-            )}
-            {crumbAsin && (
-              <>
-                <ChevronRight className="h-3 w-3 shrink-0" />
-                <span className="truncate font-mono text-gray-700">{crumbAsin.childAsin}</span>
               </>
             )}
           </div>
@@ -752,7 +670,6 @@ export function MaterialDrawer({ material, onClose, initialVariantId, onFindSimi
               >
                 {t}
                 {t === '关联设计' && <span className="ml-0.5 text-[11px] text-gray-300">{designs.length}</span>}
-                {t === '关联ASIN' && <span className="ml-0.5 text-[11px] text-gray-300">{asins.length}</span>}
                 {t === '副素材' && <span className="ml-0.5 text-[11px] text-gray-300">{variantCount}</span>}
                 {tab === t && <span className="absolute inset-x-0 bottom-0 h-0.5 bg-[#3d3192]" />}
               </button>
@@ -791,20 +708,17 @@ export function MaterialDrawer({ material, onClose, initialVariantId, onFindSimi
               designs={designs}
               onViewDesign={(d) => {
                 setCrumbDesign(d);
-                setCrumbAsin(null);
                 setTab('副素材');
               }}
             />
           )}
-          {tab === '关联ASIN' && (
-            <MaterialAsinList
-              asins={crumbDesign ? asins.filter((a) => a.designCode === crumbDesign.designCode) : asins}
-              onViewAsin={(a) => {
-                const d = designs.find((x) => x.designCode === a.designCode) ?? null;
-                if (d) setCrumbDesign(d);
-                setCrumbAsin(a);
-              }}
-            />
+          {tab === '上架信息' && (
+            /* 主素材按 MAT code；若打开的是副素材（kind=VARIANT）则按 variant id */
+            m.kind === 'VARIANT' ? (
+              <MaterialListings variantId={m.id} />
+            ) : (
+              <MaterialListings materialCode={m.id} />
+            )
           )}
           {tab === '数据表现' && <PerformanceTab />}
           {tab === '副素材' && (

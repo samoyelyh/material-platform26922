@@ -385,6 +385,7 @@ def to_task_dto(db: Session, task: DistributionTask) -> DistributionTaskDTO:
         children=[ChildAsinDTO.from_entity(c) for c in children],
         variantCount=len(items),
         deliveryRound=delivery_round,
+        listingCount=len(task.listings),
     )
 
 

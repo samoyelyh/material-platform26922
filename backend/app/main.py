@@ -19,6 +19,7 @@ from app.api import (
     distributions,
     effect_images,
     image_search,
+    listings,
     materials,
     pairings,
     uploads,
@@ -93,6 +94,7 @@ app.include_router(materials.router, prefix=settings.api_prefix)
 app.include_router(pairings.router, prefix=settings.api_prefix)
 app.include_router(batches.router, prefix=settings.api_prefix)
 app.include_router(distributions.router, prefix=settings.api_prefix)
+app.include_router(listings.router, prefix=settings.api_prefix)
 app.include_router(effect_images.router, prefix=settings.api_prefix)
 app.include_router(contract.router, prefix=settings.api_prefix)
 app.include_router(image_search.router, prefix=settings.api_prefix)
