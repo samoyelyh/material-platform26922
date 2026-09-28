@@ -1,6 +1,7 @@
 import { useState } from 'react'
-import { ChevronDown, ChevronRight, Package, Trash2, Undo2 } from 'lucide-react'
+import { ChevronDown, ChevronRight, Package, Send, Trash2, Undo2 } from 'lucide-react'
 import type { DesignPackageGroupView } from '@/types/material-workflow'
+import type { OperatorOptionDto } from '@/services/apiClient'
 
 export interface ArchivedPackageView {
   id: string
@@ -23,6 +24,10 @@ interface Props {
   /** 已删除（归档）的设计包 */
   archived?: ArchivedPackageView[]
   onRestorePackage?: (pkg: ArchivedPackageView) => Promise<void>
+  /** 派发给运营（仅 ADMIN / DESIGN_MANAGER 传入）：选真实运营账号后派发当前上架版本 */
+  canDispatch?: boolean
+  operatorOptions?: OperatorOptionDto[]
+  onDispatchPackage?: (group: DesignPackageGroupView, operatorUserId: string) => Promise<void>
 }
 
 /**
@@ -31,6 +36,7 @@ interface Props {
  *
  * 每个设计包可以直接删除（软删除 / 归档：列表不再显示，数据保留可恢复）；
  * 也可以永久删除（物理删除自身数据，共享 MAT/Asset 保留，不可恢复）。
+ * 管理员 / 美工组长可在折叠行直接派发给真实运营账号（选 users 里的 OPERATOR）。
  */
 export function MaterialPackageGroups({
   groups,
@@ -41,11 +47,17 @@ export function MaterialPackageGroups({
   onDeletePackagePermanent,
   archived = [],
   onRestorePackage,
+  canDispatch = false,
+  operatorOptions = [],
+  onDispatchPackage,
 }: Props) {
   const [pending, setPending] = useState('')
   const [confirm, setConfirm] = useState<DesignPackageGroupView | null>(null)
   const [confirmPermanent, setConfirmPermanent] = useState<DesignPackageGroupView | null>(null)
   const [showArchived, setShowArchived] = useState(false)
+  /** 派发弹窗：目标设计包 + 选中的运营 user id */
+  const [dispatchTarget, setDispatchTarget] = useState<DesignPackageGroupView | null>(null)
+  const [dispatchOperatorId, setDispatchOperatorId] = useState('')
 
   if (!groups.length) {
     return (
@@ -145,6 +157,20 @@ export function MaterialPackageGroups({
                   <div>上传人：{group.latestUpload?.uploaderName ?? group.pkg.createdBy}</div>
                 </div>
               </button>
+              {canDispatch && onDispatchPackage && (
+                <button
+                  onClick={() => {
+                    setDispatchTarget(group)
+                    setDispatchOperatorId(operatorOptions[0]?.id ?? '')
+                  }}
+                  disabled={pending === group.pkg.id}
+                  title={group.currentBatchNo > 0 ? `派发当前上架版本 V${group.currentBatchNo} 给运营` : '该设计包还没有上架版本，无法派发'}
+                  className="flex shrink-0 items-center gap-1 rounded border border-[#3d3192]/30 px-2 py-1 text-[11px] text-[#3d3192] transition-colors hover:bg-[#f0eef9] disabled:opacity-50"
+                >
+                  <Send className="h-3.5 w-3.5" />
+                  派发
+                </button>
+              )}
               {onDeletePackage && (
                 <button
                   onClick={() => setConfirm(group)}
@@ -283,6 +309,61 @@ export function MaterialPackageGroups({
                 永久删除（不可恢复）
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {/* 派发给运营：选真实 OPERATOR 账号（users 表），派发当前上架版本 */}
+      {dispatchTarget && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center">
+          <div className="absolute inset-0 bg-black/30" onClick={() => setDispatchTarget(null)} />
+          <div className="relative w-[420px] max-w-[92vw] rounded-lg bg-white p-5 shadow-2xl">
+            <h3 className="text-sm font-semibold text-gray-900">派发设计包「{dispatchTarget.pkg.name}」</h3>
+            <div className="mt-2 space-y-1 text-xs text-gray-600">
+              <p>· 上架版本：<b>V{dispatchTarget.currentBatchNo || '?'}</b>（{dispatchTarget.variantCount} 个副素材）</p>
+              <p>· 派发后运营在「我的任务」里接收素材、下载素材包并登记上架链接</p>
+              <p>· 同一版本已派发给同一运营且任务进行中时，后端会拒绝重复派发</p>
+            </div>
+            <label className="mt-3 block space-y-1.5 text-xs">
+              <span className="font-medium text-gray-600">派发给运营 <b className="text-red-500">*</b></span>
+              <select
+                value={dispatchOperatorId}
+                onChange={(event) => setDispatchOperatorId(event.target.value)}
+                className="h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-xs"
+              >
+                {operatorOptions.length === 0 && <option value="">（暂无可派发运营）</option>}
+                {operatorOptions.map((item) => (
+                  <option key={item.id} value={item.id}>{item.displayName}</option>
+                ))}
+              </select>
+            </label>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                onClick={() => setDispatchTarget(null)}
+                className="rounded border border-gray-300 px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-50"
+              >
+                取消
+              </button>
+              <button
+                disabled={!dispatchOperatorId || dispatchTarget.currentBatchNo <= 0 || pending === dispatchTarget.pkg.id}
+                onClick={async () => {
+                  const target = dispatchTarget
+                  const operatorId = dispatchOperatorId
+                  setDispatchTarget(null)
+                  setPending(target.pkg.id)
+                  try {
+                    await onDispatchPackage?.(target, operatorId)
+                  } finally {
+                    setPending('')
+                  }
+                }}
+                className="rounded bg-[#3d3192] px-3 py-1.5 text-xs font-medium text-white hover:bg-[#32277a] disabled:opacity-50"
+              >
+                确认派发
+              </button>
+            </div>
+            {dispatchTarget.currentBatchNo <= 0 && (
+              <p className="mt-2 text-[11px] text-red-500">该设计包还没有上架版本（V1），请先在上传页生成版本后再派发。</p>
+            )}
           </div>
         </div>
       )}

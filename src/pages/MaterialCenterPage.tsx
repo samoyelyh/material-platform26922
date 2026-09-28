@@ -28,7 +28,7 @@ import {
   useWorkflowState,
 } from '@/store/workflowStore';
 import { canDispatch, canManageUsers, setLoggedOut, useAuth } from '@/store/authStore';
-import { API_ENABLED, materialApi, resolveMediaUrl, type ImageSearchResultDto } from '@/services/apiClient';
+import { API_ENABLED, materialApi, resolveMediaUrl, usersApi, type ImageSearchResultDto, type OperatorOptionDto } from '@/services/apiClient';
 import type { Material } from '@/types/material';
 
 const DEFAULT_FILTERS: FilterValues = {
@@ -49,6 +49,13 @@ export default function MaterialCenterPage() {
   useWorkflowState();
   // 当前登录用户（角色控制入口显示）
   const { user: authUser } = useAuth();
+  // 派发运营选项（仅管理员/美工组长需要；来自真实 users 表 role=OPERATOR 且启用）
+  const dispatchEnabled = canDispatch(authUser);
+  const [operatorOptions, setOperatorOptions] = useState<OperatorOptionDto[]>([]);
+  useEffect(() => {
+    if (!dispatchEnabled || !API_ENABLED) return;
+    void usersApi.listOperators().then(setOperatorOptions).catch(() => setOperatorOptions([]));
+  }, [dispatchEnabled]);
 
   const [keyword, setKeyword] = useState('');
   const [catSel, setCatSel] = useState<CategorySelection>({ category: '', subCategory: '' });
@@ -842,6 +849,17 @@ export default function MaterialCenterPage() {
                 return next;
               })}
               onOpenMaterial={openMaterialByCode}
+              canDispatch={dispatchEnabled}
+              operatorOptions={operatorOptions}
+              onDispatchPackage={async (group, operatorUserId) => {
+                try {
+                  const dto = await materialApi.createDistribution(group.pkg.id, { operatorUserId });
+                  const operatorName = operatorOptions.find((o) => o.id === operatorUserId)?.displayName ?? dto.operatorName;
+                  toast.success(`已派发「${group.pkg.name}」V${group.currentBatchNo} 给 ${operatorName}（${dto.variantCount} 个副素材）`);
+                } catch (error) {
+                  toast.error(error instanceof Error ? error.message : '派发失败');
+                }
+              }}
               onDeletePackage={async (group) => {
                 try {
                   await deletePackageFromApi(group.pkg.id, '素材中心');
